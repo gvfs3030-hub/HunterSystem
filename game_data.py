@@ -1,5 +1,6 @@
 """Dados iniciais do Hunter System. Tudo pode ser adaptado no slot personalizado."""
 from copy import deepcopy
+from campaign_data import build_campaign_missions, chapter_boss_thresholds
 
 PYTHON_PHASES = [
     ("Portal de Entrada", "Boas-vindas, método do curso e mapa da jornada"),
@@ -165,33 +166,43 @@ def make_missions(profile_key):
 
 def default_profile(key):
     if key == "python":
-        title, hero, archetype, intro = "A Forja do Código", "O Aprendiz da Forja", "Artífice", "A trilha transforma o curso de Python em pequenas missões: teoria, prática e revisão. O objetivo não é marcar aulas como vistas, mas construir habilidade com as próprias mãos."
-        topics = [x[0] for x in PYTHON_PHASES]
+        title, hero, archetype, intro = "A Forja do Código", "O Aprendiz da Forja", "Artífice", "Uma campanha de fantasia sombria que acompanha o curso de Python por capítulos e tópicos progressivos. Cada etapa tem leitura guiada, prática, teste e revisão no dia seguinte."
     elif key == "caixa":
-        title, hero, archetype, intro = "A Rota da Caixa", "O Guardião do Atendimento", "Estrategista", "Uma campanha para preparar o Técnico Bancário Novo (não TI), organizada pelos componentes do edital da CAIXA 2024 que você enviou. O conteúdo é uma base de planejamento, não substitui materiais atualizados nem um novo edital."
-        topics = [x[0] for x in CAIXA_SUBJECTS]
+        title, hero, archetype, intro = "A Rota da Caixa", "O Guardião do Atendimento", "Estrategista", "Uma campanha para Técnico Bancário Novo (não TI), organizada por tópicos do edital CAIXA 2024 anexado. É uma base de estudos, não substitui edital futuro nem materiais atualizados."
     else:
-        title, hero, archetype, intro = "A Jornada Livre", "Aventureiro Personalizado", "Explorador", "Este slot é seu. Defina o que quer aprender, crie suas próprias etapas e escolha os guardiões que marcarão seu progresso."
-        topics = ["Trilha pessoal 1 — renomeie", "Trilha pessoal 2 — renomeie", "Trilha pessoal 3 — renomeie", "Projeto livre — renomeie", "Revisão final — renomeie"]
-    bosses = [{"id":f"{key}_boss_{i+1}","name":name,"subtitle":sub,"threshold":0,"hp":120+i*65,"attack":8+i*3,"reward_xp":70+i*25,"reward_gold":45+i*20} for i,(name,sub) in enumerate(BOSS_NAMES)]
+        title, hero, archetype, intro = "A Jornada Livre", "Aventureiro Personalizado", "Explorador", "Uma campanha pessoal inteiramente sua. Edite os temas, avance em sequência e acrescente suas próprias questões para que os testes correspondam ao que está estudando."
+    missions = build_campaign_missions(key)
+    topics = list(dict.fromkeys(m["chapter_title"] for m in missions))
+    campaign_bosses = BOSS_NAMES
     if key == "python":
-        missions = make_missions("python")
+        campaign_bosses = [
+            ("O Guardião da Sintaxe", "A primeira grande porta exige que você conecte lógica, objetos e estrutura sem depender de tentativa cega."),
+            ("A Arquiteta dos Módulos", "Ela espalha responsabilidades por arquivos e só cede diante de uma estrutura clara."),
+            ("O Devorador de Dados", "Este guardião tenta apagar informações e explorar entradas malformadas; testes e persistência são suas armas."),
+            ("A Sombra de Produção", "A aplicação funciona no laboratório. Agora prove que sabe cuidar de segurança, integração e publicação."),
+            ("O Rei do Código Inacabado", "A prova final reúne arquitetura, testes, documentação e uma aplicação que resolve um problema real."),
+        ]
     elif key == "caixa":
-        missions = make_missions("caixa")
-    else:
-        missions = make_missions("custom")
-    milestones = [max(3, int(len(missions)*0.08)), max(4, int(len(missions)*0.28)), max(5, int(len(missions)*0.50)), max(6, int(len(missions)*0.75)), len(missions)]
-    for i,boss in enumerate(bosses):
-        boss["threshold"] = min(len(missions), milestones[i]) if i < len(milestones)-1 else len(missions)
-        if i and boss["threshold"] <= bosses[i-1]["threshold"]:
-            boss["threshold"] = min(len(missions), bosses[i-1]["threshold"] + 1)
+        campaign_bosses = [
+            ("O Intérprete da Neblina", "Compreensão textual, inglês e leitura cuidadosa contra alternativas que parecem certas."),
+            ("A Balança do Capital", "Juros, sequências e estatística precisam ser calculados com premissas explícitas."),
+            ("O Guardião do Sigilo", "Ética, privacidade e compliance não admitem atalhos nem justificativas vagas."),
+            ("A Serpente dos Mercados", "Sistema financeiro, produtos, tecnologia e comportamento digital precisam formar um mapa coerente."),
+            ("O Examinador da Última Prova", "A última prova exige recuperação ativa dos conteúdos, atendimento responsável e escrita bem organizada."),
+        ]
+    bosses = [{"id":f"{key}_boss_{i+1}","name":name,"subtitle":sub,"threshold":0,"hp":120+i*65,"attack":8+i*3,"reward_xp":70+i*25,"reward_gold":45+i*20} for i,(name,sub) in enumerate(campaign_bosses)]
+    thresholds = chapter_boss_thresholds(missions, len(bosses))
+    for boss, threshold in zip(bosses, thresholds):
+        boss["threshold"] = threshold
     return {
-        "key":key,"settings":{"title":title,"hero":hero,"archetype":archetype,"intro":intro,"topics":topics,"boss_names":[b["name"] for b in bosses],"missions_text":""},
+        "key":key,"campaign_schema":3,
+        "settings":{"title":title,"hero":hero,"archetype":archetype,"intro":intro,"topics":topics,"boss_names":[b["name"] for b in bosses],"missions_text":""},
         "level":1,"xp":0,"gold":120 if key != "custom" else 80,"completed_missions":[],"bosses_defeated":[],"mission_data":missions,"boss_data":bosses,
         "attributes":{"strength":1,"focus":1,"endurance":1},"attribute_points":0,"inventory":["weapon_training"],"equipped":{"weapon":"weapon_training","armor":None,"charm":None},"potions":2,
-        "last_study_date":"","streak":0,"history":[],"quiz_answered":[],"event_claims":{},"story_seen":[],"notes":"","custom_quiz_text":""
+        "last_study_date":"","streak":0,"history":[],"quiz_answered":[],"event_claims":{},"story_seen":[],"story_chapters_seen":[],"lesson_notes":{},"quiz_stats":{},
+        "review_queue":[],"boss_exam_results":{},"notes":"","custom_quiz_text":""
     }
 
 
 def create_save():
-    return {"version":1,"active_profile":"python","profiles":{"python":default_profile("python"),"caixa":default_profile("caixa"),"custom":default_profile("custom")}}
+    return {"version":3,"active_profile":"python","profiles":{"python":default_profile("python"),"caixa":default_profile("caixa"),"custom":default_profile("custom")}}

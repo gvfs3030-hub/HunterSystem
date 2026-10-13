@@ -1,15 +1,24 @@
-HUNTER SYSTEM — COMO GERAR O EXECUTÁVEL PELO NAVEGADOR
+HUNTER SYSTEM — CRÔNICAS DA FORJA
 
-1. Baixe e extraia HunterSystem_Windows_Source.zip no computador.
-2. No GitHub, crie um repositório vazio chamado hunter-system (sem README automático, se possível).
-3. Abra Add file > Upload files e envie main.py, game_data.py, README.md, requirements.txt e .gitignore.
-4. Para criar o workflow, use Add file > Create new file. No nome do arquivo, digite exatamente:
-   .github/workflows/build-windows.yml
-   Cole o conteúdo do arquivo .github/workflows/build-windows.yml que veio no ZIP e faça commit.
-   (Se o site aceitar enviar pastas, pode enviar a pasta .github inteira junto com os demais arquivos.)
+GERAR O EXECUTÁVEL PELO NAVEGADOR
+
+1. Baixe e extraia o ZIP do projeto no computador.
+2. No GitHub, crie um repositório vazio chamado hunter-system.
+3. Envie a pasta extraída completa. A raiz precisa conter main.py, game_data.py, campaign_data.py, requirements.txt, README.md, a pasta assets e .github/workflows/build-windows.yml.
+4. Se o GitHub não aceitar a pasta oculta .github, use Add file > Create new file e escreva no campo de nome: .github/workflows/build-windows.yml. Cole o workflow que acompanha o projeto e faça commit.
 5. Abra Actions > Build Hunter System para Windows > Run workflow.
-6. Espere a execução ficar verde. Entre nela, encontre Artifacts e baixe HunterSystem-Windows.
-7. Extraia esse artefato e execute HunterSystem.exe no Windows.
+6. Aguarde a execução ficar verde. Abra a execução e baixe o artefato HunterSystem-Windows.
+7. Extraia esse segundo ZIP e execute HunterSystem.exe no Windows.
 
-O ZIP de origem NÃO contém o .exe: o GitHub Actions compila o executável para Windows.
-O progresso do aplicativo fica no seu próprio computador e pode ser exportado pela tela Configuração.
+CAMPANHA
+- Python: 141 etapas temáticas inspiradas no curso Udemy; use o botão dentro da lição para abrir o curso e acompanhe o tema correspondente. A trilha não é uma transcrição dos 751 vídeos.
+- Caixa: 82 etapas temáticas baseadas no edital de Técnico Bancário Novo (não TI) anexado, edital 2024. Não é garantia de que um edital futuro será igual.
+- Jornada Livre: tópicos editáveis.
+- Para dominar uma página, faça a atividade e passe na prova de 4 questões (3 acertos necessários). Cada etapa agendará uma recapitulação para o dia seguinte. Os chefes também exigem prova cumulativa.
+
+BACKUP E REINÍCIO
+- Configuração > Backup completo ZIP exporta todos os slots, anotações, inventários, histórico e revisões.
+- Configuração > Importar ZIP / JSON restaura um backup; o app cria uma cópia de segurança local antes de importar.
+- Configuração > Reiniciar / apagar progresso deste slot apaga somente o perfil aberto, depois de confirmação e backup automático.
+
+O ZIP DE ORIGEM NÃO CONTÉM O .EXE; o GitHub Actions compila o executável para Windows.

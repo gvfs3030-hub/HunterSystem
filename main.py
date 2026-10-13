@@ -1,6 +1,6 @@
 from __future__ import annotations
-import json, os, random, sys, textwrap
-from datetime import date, timedelta
+import json, os, random, sys, textwrap, zipfile, shutil, webbrowser
+from datetime import date, timedelta, datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -10,8 +10,9 @@ from game_data import (
     PYTHON_MISSION_SUFFIXES, CAIXA_MISSION_SUFFIXES, PYTHON_QUIZ,
     CAIXA_QUIZ, SHOP_ITEMS, STORY, BOSS_NAMES,
 )
+from campaign_data import build_campaign_missions, chapter_boss_thresholds
 
-APP_NAME = "HUNTER SYSTEM"
+APP_NAME = "HUNTER SYSTEM — CRÔNICAS DA FORJA"
 BG = "#0b0b12"
 SIDEBAR = "#11111b"
 PANEL = "#171724"
@@ -82,10 +83,11 @@ class ScrollFrame(tk.Frame):
 class HunterSystem(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Hunter System — A Forja da Constância")
+        self.title("Hunter System — Crônicas da Forja")
         self.geometry("1280x820")
         self.minsize(1000, 650)
         self.configure(bg=BG)
+        self._apply_window_icon()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._setup_style()
         self.save_file = save_path()
@@ -109,10 +111,25 @@ class HunterSystem(tk.Tk):
         profile = self.profile
         if "intro" not in profile.get("story_seen", []):
             self.after(450, lambda: self.show_story("intro"))
+        self.after(900, self._announce_due_reviews)
 
     @property
     def profile(self):
         return self.data["profiles"][self.active_key]
+
+    def _asset_path(self, name):
+        """Resolve resources both in source mode and inside PyInstaller's one-file bundle."""
+        root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        return root / "assets" / name
+
+    def _apply_window_icon(self):
+        try:
+            icon = self._asset_path("hunter_sigil.ico")
+            if icon.exists():
+                self.iconbitmap(str(icon))
+        except Exception:
+            # Canvas emblem remains available when an OS/theme does not accept .ico.
+            pass
 
     def _setup_style(self):
         style = ttk.Style(self)
@@ -137,12 +154,35 @@ class HunterSystem(tk.Tk):
                     if key not in raw.get("profiles", {}):
                         raw.setdefault("profiles", {})[key] = base["profiles"][key]
                     else:
-                        # Corrige saves de versões futuras/incompletas sem apagar dados conhecidos.
+                        # Migration from the earlier mission-list prototype to the linear campaign.
+                        # Keep character/equipment/economy/history, but make the new curriculum its own fresh path.
+                        saved = raw["profiles"][key]
                         seed = base["profiles"][key]
+                        if safe_int(saved.get("campaign_schema", 0)) < 3:
+                            # Preserve character/economy/history and any progress whose stable lesson IDs still exist.
+                            # Older prototype missions with different IDs cannot safely map to the new linear curriculum.
+                            old_completed = set(saved.get("completed_missions", []))
+                            old_reviews = saved.get("review_queue", []) if isinstance(saved.get("review_queue", []), list) else []
+                            old_bosses = set(saved.get("bosses_defeated", []))
+                            for field in ("level", "xp", "gold", "attributes", "attribute_points", "inventory", "equipped", "potions", "last_study_date", "streak", "history", "event_claims", "notes", "custom_quiz_text", "settings", "lesson_notes", "quiz_stats", "story_seen", "story_chapters_seen", "boss_exam_results"):
+                                if field not in saved:
+                                    saved[field] = seed.get(field)
+                            saved["mission_data"] = seed["mission_data"]
+                            saved["boss_data"] = seed["boss_data"]
+                            valid_ids = {m["id"] for m in seed["mission_data"]}
+                            valid_boss_ids = {b["id"] for b in seed["boss_data"]}
+                            saved["completed_missions"] = [mid for mid in old_completed if mid in valid_ids]
+                            saved["bosses_defeated"] = [bid for bid in old_bosses if bid in valid_boss_ids]
+                            saved["review_queue"] = [r for r in old_reviews if isinstance(r, dict) and r.get("lesson_id") in valid_ids]
+                            saved["campaign_schema"] = 3
+                            saved.setdefault("history", []).append({"date": date.today().isoformat(), "type": "sistema", "title": "Campanha Crônicas da Forja atualizada", "xp": 0, "gold": 0})
                         for k, v in seed.items():
-                            raw["profiles"][key].setdefault(k, v)
+                            saved.setdefault(k, v)
+                        if not isinstance(saved.get("mission_data"), list) or not saved["mission_data"]:
+                            saved["mission_data"] = seed["mission_data"]
+                        saved["campaign_schema"] = 3
                 raw.setdefault("active_profile", "python")
-                raw["version"] = 1
+                raw["version"] = 3
                 return raw
         except Exception as exc:
             try:
@@ -242,7 +282,8 @@ class HunterSystem(tk.Tk):
         self.content_host.grid_rowconfigure(0, weight=1)
         self.content_host.grid_columnconfigure(0, weight=1)
         if self.page == "Santuário": self.page_dashboard()
-        elif self.page == "Missões": self.page_missions()
+        elif self.page in ("Campanha", "Missões"): self.page_campaign()
+        elif self.page == "Revisões": self.page_reviews()
         elif self.page == "Chefes": self.page_bosses()
         elif self.page == "Arsenal": self.page_armory()
         elif self.page == "Eventos": self.page_events()
@@ -254,15 +295,25 @@ class HunterSystem(tk.Tk):
             w.destroy()
         logo = tk.Frame(self.sidebar, bg=SIDEBAR)
         logo.pack(fill="x", padx=18, pady=(22, 22))
-        emblem = tk.Canvas(logo, width=42, height=42, bg=SIDEBAR, highlightthickness=0)
-        emblem.pack(side="left", padx=(0, 10))
-        emblem.create_polygon(21, 1, 39, 13, 35, 32, 21, 41, 7, 32, 3, 13, fill=PURPLE_DARK, outline=GOLD, width=1)
-        emblem.create_line(21, 8, 21, 34, fill=GOLD, width=2)
-        emblem.create_line(12, 20, 30, 20, fill=GOLD, width=2)
+        try:
+            # Brand artwork: eclipsed portal, open grimoire and golden relic.
+            self.sidebar_logo_image = tk.PhotoImage(file=str(self._asset_path("hunter_sigil_small.png")))
+            tk.Label(logo, image=self.sidebar_logo_image, bg=SIDEBAR, bd=0).pack(side="left", padx=(0, 10))
+        except Exception:
+            emblem = tk.Canvas(logo, width=48, height=48, bg=SIDEBAR, highlightthickness=0)
+            emblem.pack(side="left", padx=(0, 10))
+            emblem.create_oval(2, 2, 46, 46, outline="#6e4b96", width=1)
+            emblem.create_oval(6, 6, 42, 42, outline=GOLD, width=1)
+            emblem.create_polygon(24, 7, 36, 14, 34, 29, 24, 39, 14, 29, 12, 14, fill=PURPLE_DARK, outline=GOLD, width=1)
+            emblem.create_polygon(24, 10, 29, 23, 24, 29, 19, 23, fill="#f4f0ff", outline=GOLD, width=1)
+            emblem.create_line(24, 25, 24, 34, fill=GOLD, width=2)
+            emblem.create_line(18, 29, 30, 29, fill=GOLD, width=2)
+            emblem.create_line(14, 34, 23, 37, fill="#f4f0ff", width=1)
+            emblem.create_line(25, 37, 34, 34, fill="#f4f0ff", width=1)
         brand = tk.Frame(logo, bg=SIDEBAR)
         brand.pack(side="left", fill="y")
         tk.Label(brand, text="HUNTER", bg=SIDEBAR, fg=TEXT, font=(FONT, 15, "bold")).pack(anchor="w")
-        tk.Label(brand, text="SYSTEM  /  FORJA DA CONSTÂNCIA", bg=SIDEBAR, fg=PURPLE, font=(FONT, 7, "bold")).pack(anchor="w")
+        tk.Label(brand, text="CRÔNICAS  /  DA FORJA", bg=SIDEBAR, fg=PURPLE, font=(FONT, 7, "bold")).pack(anchor="w")
         tk.Label(self.sidebar, text="SLOTS DE JORNADA", bg=SIDEBAR, fg=MUTED, font=(FONT, 8, "bold"), anchor="w").pack(fill="x", padx=18, pady=(0, 8))
         slot_data = [
             ("python", "01", "FORJA DO CÓDIGO", "Python · curso Udemy", PURPLE),
@@ -289,7 +340,7 @@ class HunterSystem(tk.Tk):
                 widget.bind("<Button-1>", lambda e, k=key: self.switch_profile(k))
         tk.Frame(self.sidebar, bg=BORDER, height=1).pack(fill="x", padx=18, pady=(18, 13))
         tk.Label(self.sidebar, text="REFÚGIO", bg=SIDEBAR, fg=MUTED, font=(FONT, 8, "bold"), anchor="w").pack(fill="x", padx=18, pady=(0, 8))
-        nav = [("Santuário", "⌂"), ("Missões", "✦"), ("Chefes", "⚔"), ("Arsenal", "◇"), ("Eventos", "◷"), ("Códice", "▤"), ("Configuração", "⚙")]
+        nav = [("Santuário", "⌂"), ("Campanha", "✦"), ("Revisões", "↻"), ("Chefes", "⚔"), ("Arsenal", "◇"), ("Eventos", "◷"), ("Códice", "▤"), ("Configuração", "⚙")]
         for label, glyph in nav:
             selected = self.page == label
             b = tk.Frame(self.sidebar, bg="#27223d" if selected else SIDEBAR, cursor="hand2")
@@ -303,7 +354,7 @@ class HunterSystem(tk.Tk):
         bottom = tk.Frame(self.sidebar, bg="#191824", highlightbackground=BORDER, highlightthickness=1)
         bottom.pack(fill="x", padx=13, pady=14)
         tk.Label(bottom, text=f"NÍVEL {self.profile['level']}  ·  {self.profile['settings']['archetype'].upper()}", bg="#191824", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", padx=11, pady=(10, 2))
-        tk.Label(bottom, text=f"{len(self.profile['completed_missions'])}/{len(self.profile['mission_data'])} missões concluídas", bg="#191824", fg=MUTED, font=(FONT, 8)).pack(anchor="w", padx=11, pady=(0, 10))
+        tk.Label(bottom, text=f"{len(self.profile['completed_missions'])}/{len(self.profile['mission_data'])} tópicos dominados", bg="#191824", fg=MUTED, font=(FONT, 8)).pack(anchor="w", padx=11, pady=(0, 10))
 
     def _render_header(self):
         for w in self.header.winfo_children(): w.destroy()
@@ -390,22 +441,10 @@ class HunterSystem(tk.Tk):
         p["last_study_date"] = today_s
 
     def complete_mission(self, mission_id):
-        p = self.profile
-        mission = next((m for m in p["mission_data"] if m["id"] == mission_id), None)
-        if not mission or mission_id in p["completed_missions"]:
-            return
-        p["completed_missions"].append(mission_id)
-        p["gold"] += mission.get("coins", 10)
-        levels = self.gain_xp(mission.get("xp", 30))
-        self.update_streak()
-        p["history"].append({"date":date.today().isoformat(),"type":"missão","title":mission["title"],"xp":mission.get("xp",30),"gold":mission.get("coins",10)})
-        self.save()
-        self.render()
-        msg = f"Missão concluída: {mission['title']}\n+{mission.get('xp',30)} XP  ·  +{mission.get('coins',10)} ouro"
-        if levels:
-            msg += f"\n\nSUBIU {levels} NÍVEL(IS)! Você recebeu {levels*2} pontos de atributo."
-        self.status_var.set("Missão registrada. A jornada continua.")
-        messagebox.showinfo("Recompensa recebida", msg)
+        # Backwards-compatible entry point. A topic can no longer be checked off without its test.
+        mission = next((m for m in self.profile["mission_data"] if m["id"] == mission_id), None)
+        if mission:
+            self.start_lesson(mission)
 
     def spend_attribute(self, attr):
         p = self.profile
@@ -460,7 +499,8 @@ class HunterSystem(tk.Tk):
         hero.grid_columnconfigure(1, weight=0)
         left = tk.Frame(hero, bg="#20172f")
         left.grid(row=0, column=0, sticky="nsew", padx=22, pady=20)
-        tk.Label(left, text="A CIDADE SEM AURORA  /  CAPÍTULO I", bg="#20172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
+        setting_kicker = {"python":"A CIDADE SEM AURORA  /  CAPÍTULO I", "caixa":"O ARQUIVO DOS ECOS  /  CAPÍTULO I", "custom":"O MAPA EM BRANCO  /  CAPÍTULO I"}.get(self.active_key, "CRÔNICAS DA FORJA")
+        tk.Label(left, text=setting_kicker, bg="#20172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
         tk.Label(left, text=p["settings"]["hero"], bg="#20172f", fg=TEXT, font=(FONT, 22, "bold")).pack(anchor="w", pady=(5, 3))
         tk.Label(left, text=p["settings"]["intro"], bg="#20172f", fg="#d5cde8", font=(FONT, 10), wraplength=700, justify="left").pack(anchor="w", pady=(0, 9 if self.active_key == "caixa" else 15))
         if self.active_key == "caixa":
@@ -473,7 +513,7 @@ class HunterSystem(tk.Tk):
         tk.Frame(bar, bg=PURPLE, height=7).place(relx=0, rely=0, relwidth=pct/100, relheight=1)
         actions = tk.Frame(left, bg="#20172f")
         actions.pack(anchor="w", pady=(14, 0))
-        self._button(actions, "RETOMAR A JORNADA  →", lambda:self.navigate("Missões"), "primary").pack(side="left", padx=(0, 8))
+        self._button(actions, "RETOMAR A JORNADA  →", lambda:self.navigate("Campanha"), "primary").pack(side="left", padx=(0, 8))
         self._button(actions, "OUVIR A HISTÓRIA", lambda:self.show_story("intro", replay=True), "secondary").pack(side="left")
         sigil = tk.Canvas(hero, width=172, height=170, bg="#20172f", highlightthickness=0)
         sigil.grid(row=0, column=1, padx=22, pady=12)
@@ -525,14 +565,23 @@ class HunterSystem(tk.Tk):
         if p["attribute_points"]:
             tk.Label(statsbody, text=f"Você tem {p['attribute_points']} ponto(s) de atributo para distribuir.", bg=PANEL, fg=GOLD, font=(FONT, 8)).pack(anchor="w", pady=(8, 0))
 
-        self._section(leftcol, "Missões em destaque", "PRÓXIMOS PASSOS")
-        missions = [m for m in p["mission_data"] if m["id"] not in p["completed_missions"]][:4]
-        if not missions:
-            msg = self._card(leftcol, "Todas as missões concluídas", "UM MARCO IMPORTANTE")
+        self._section(leftcol, "A próxima página", "UMA MISSÃO LIBERADA POR VEZ")
+        mission = self.next_lesson()
+        waiting_boss = self.pending_guardian()
+        blocked_by_boss = bool(mission and waiting_boss and mission.get("global_index", 0) > waiting_boss.get("threshold", 0))
+        if blocked_by_boss:
+            msg = self._card(leftcol, f"O guardião aguarda: {waiting_boss['name']}", "CHECKPOINT DA CAMPANHA")
             msg.pack(fill="x")
-            tk.Label(msg, text="Sua trilha foi concluída. É hora de revisar, enfrentar o guardião final e celebrar o que construiu.", bg=PANEL, fg=MUTED, wraplength=600, justify="left").pack(anchor="w", padx=16, pady=(0, 15))
-        for mission in missions:
+            tk.Label(msg, text="Você concluiu o trecho exigido. A próxima região só será aberta depois da prova cumulativa e do combate. Reforce o equipamento, se precisar.", bg=PANEL, fg=MUTED, wraplength=600, justify="left").pack(anchor="w", padx=16, pady=(0, 15))
+            self._button(msg, "IR À CÂMARA DOS GUARDIÕES  ⚔", lambda:self.navigate("Chefes"), "danger").pack(anchor="w", padx=16, pady=(0, 14))
+        elif not mission:
+            msg = self._card(leftcol, "Todos os tópicos concluídos", "UM MARCO IMPORTANTE")
+            msg.pack(fill="x")
+            tk.Label(msg, text="A trilha de estudo foi concluída. Faça as recapitulações pendentes e prove seu domínio na Câmara dos Guardiões.", bg=PANEL, fg=MUTED, wraplength=600, justify="left").pack(anchor="w", padx=16, pady=(0, 15))
+            self._button(msg, "ENTRAR NA CÂMARA DOS GUARDIÕES  →", lambda:self.navigate("Chefes"), "gold").pack(anchor="w", padx=16, pady=(0, 14))
+        else:
             self._mission_card(leftcol, mission, compact=True)
+            tk.Label(leftcol, text="O mapa só revela o próximo passo. Termine a aula, passe no teste e volte amanhã para a recapitulação.", bg=BG, fg=MUTED, font=(FONT, 8), wraplength=640, justify="left").pack(anchor="w", pady=(0, 10))
 
         streak = self._card(rightcol, "Ritmo da jornada", "CONSTÂNCIA > INTENSIDADE")
         streak.pack(fill="x", pady=(0, 14))
@@ -594,10 +643,11 @@ class HunterSystem(tk.Tk):
         tk.Label(card, text=mission["description"], bg=PANEL, fg=MUTED, font=(FONT, 9), anchor="w", justify="left", wraplength=620).pack(fill="x", padx=15, pady=(0, 10))
         row = tk.Frame(card, bg=PANEL); row.pack(fill="x", padx=15, pady=(0, 12))
         if compact:
-            tk.Label(row, text="Uma etapa de cada vez. Registre apenas quando terminar.", bg=PANEL, fg="#6f6a85", font=(FONT, 8)).pack(side="left", fill="x", expand=True)
+            tk.Label(row, text="Estude, pratique e passe no teste para receber a recompensa.", bg=PANEL, fg="#6f6a85", font=(FONT, 8)).pack(side="left", fill="x", expand=True)
         else:
-            tk.Label(row, text="Recompensa ao concluir", bg=PANEL, fg=MUTED, font=(FONT, 8)).pack(side="left", fill="x", expand=True)
-        self._button(row, "CONCLUIR MISSÃO  ✓", lambda mid=mission["id"]:self.complete_mission(mid), "mint").pack(side="right")
+            tk.Label(row, text="Teste de domínio obrigatório · revisão amanhã", bg=PANEL, fg=MUTED, font=(FONT, 8)).pack(side="left", fill="x", expand=True)
+        is_done = mission["id"] in self.profile["completed_missions"]
+        self._button(row, "REVER TÓPICO  ↺" if is_done else "INICIAR TÓPICO  →", lambda m=mission:self.start_lesson(m), "secondary" if is_done else "mint").pack(side="right")
 
     # ------------------------------ MISSIONS -------------------------------
     def page_missions(self):
@@ -645,6 +695,431 @@ class HunterSystem(tk.Tk):
         cb.bind("<<ComboboxSelected>>", refresh); status.bind("<<ComboboxSelected>>", refresh)
         refresh()
 
+    # -------------------------- LINEAR CAMPAIGN ---------------------------
+    def next_lesson(self):
+        completed = set(self.profile.get("completed_missions", []))
+        return next((m for m in self.profile["mission_data"] if m["id"] not in completed), None)
+
+    def lesson_by_id(self, lesson_id):
+        return next((m for m in self.profile["mission_data"] if m["id"] == lesson_id), None)
+
+    def pending_guardian(self):
+        p = self.profile
+        count = self.mission_count()
+        defeated = set(p.get("bosses_defeated", []))
+        for boss in p.get("boss_data", []):
+            if boss.get("id") not in defeated and count >= safe_int(boss.get("threshold", 10**9)):
+                return boss
+        return None
+
+    def due_reviews(self):
+        today = date.today().isoformat()
+        return [r for r in self.profile.get("review_queue", []) if not r.get("done") and r.get("due_date", "9999") <= today]
+
+    def _announce_due_reviews(self):
+        due = len(self.due_reviews())
+        if due:
+            self.status_var.set(f"Você tem {due} recapitulação(ões) para hoje. Revisar amanhã ajuda a fixar o que estudou.")
+            if self.page == "Santuário":
+                self.render()
+
+    def page_campaign(self):
+        root = self.build_scroll_page()
+        p = self.profile
+        completed = set(p.get("completed_missions", []))
+        missions = p["mission_data"]
+        current = self.next_lesson()
+        done = len(completed)
+        pct = int(done * 100 / len(missions)) if missions else 100
+
+        intro = self._card(root, "Crônicas da Forja", "CAMPANHA PRINCIPAL · PROGRESSÃO LINEAR")
+        intro.pack(fill="x", pady=(0, 14))
+        body = tk.Frame(intro, bg=PANEL)
+        body.pack(fill="x", padx=16, pady=(0, 16))
+        tk.Label(body, text=p["settings"].get("intro", "A campanha está pronta."), bg=PANEL, fg=MUTED,
+                 font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w", pady=(0, 10))
+        tk.Label(body, text=f"TÓPICOS DOMINADOS  {done}/{len(missions)}  ·  {pct}%", bg=PANEL, fg=TEXT,
+                 font=(FONT, 10, "bold")).pack(anchor="w", pady=(0, 6))
+        self._progress(body, done, len(missions), MINT, 9).pack(fill="x")
+        due_count = len(self.due_reviews())
+        tk.Label(body, text=f"Revisões para hoje: {due_count}  ·  Cada etapa inclui história, resumo, atividade e prova de domínio.",
+                 bg=PANEL, fg=GOLD if due_count else MUTED, font=(FONT, 8, "bold" if due_count else "normal")).pack(anchor="w", pady=(8, 0))
+
+        current_card = self._card(root, "Próxima página da história", "SÓ UM PASSO DE CADA VEZ")
+        current_card.pack(fill="x", pady=(0, 15))
+        cb = tk.Frame(current_card, bg=PANEL)
+        cb.pack(fill="x", padx=16, pady=(0, 16))
+        pending_boss = self.pending_guardian()
+        guardian_blocks_next = bool(current and pending_boss and current.get("global_index", 0) > pending_boss.get("threshold", 0))
+        if current and guardian_blocks_next:
+            tk.Label(cb, text="PORTAL SELADO  ·  A HISTÓRIA EXIGE UMA PROVA", bg=PANEL, fg=RED, font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 5))
+            tk.Label(cb, text=pending_boss["name"], bg=PANEL, fg=GOLD, font=(FONT, 17, "bold"), wraplength=880, justify="left").pack(anchor="w", pady=(0, 4))
+            tk.Label(cb, text="Você chegou a um checkpoint. Estudar mais capítulos agora não abrirá o mapa: demonstre o que aprendeu, derrote o guardião e então a próxima região será liberada.", bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=880, justify="left").pack(anchor="w")
+            row = tk.Frame(cb, bg=PANEL); row.pack(fill="x", pady=(12, 0))
+            self._button(row, "IR À CÂMARA DOS GUARDIÕES  ⚔", lambda:self.navigate("Chefes"), "danger").pack(side="left")
+            self._button(row, "FAZER REVISÕES  ↻", lambda:self.navigate("Revisões"), "gold" if due_count else "secondary").pack(side="left", padx=(8, 0))
+        elif current:
+            tk.Label(cb, text=f"CAPÍTULO {current['chapter_index']:02d} / {current['chapter_total']:02d}  ·  TÓPICO {current['global_index']:03d}",
+                     bg=PANEL, fg=PURPLE, font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 4))
+            tk.Label(cb, text=current["chapter_title"], bg=PANEL, fg=GOLD, font=(FONT, 10, "bold")).pack(anchor="w")
+            tk.Label(cb, text=current["title"], bg=PANEL, fg=TEXT, font=(FONT, 16, "bold"), wraplength=880, justify="left").pack(anchor="w", pady=(4, 5))
+            tk.Label(cb, text=current["description"], bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=880, justify="left").pack(anchor="w")
+            row = tk.Frame(cb, bg=PANEL); row.pack(fill="x", pady=(12, 0))
+            self._button(row, "ENTRAR NA PRÓXIMA CENA  →", lambda m=current:self.start_lesson(m), "primary").pack(side="left")
+            self._button(row, "VER REVISÕES  ↻", lambda:self.navigate("Revisões"), "gold" if due_count else "secondary").pack(side="left", padx=(8, 0))
+        else:
+            tk.Label(cb, text="Todos os tópicos foram dominados. A história aguarda o último guardião.", bg=PANEL, fg=MINT,
+                     font=(FONT, 12, "bold"), wraplength=880, justify="left").pack(anchor="w", pady=(0, 10))
+            self._button(cb, "IR À CÂMARA DOS GUARDIÕES  ⚔", lambda:self.navigate("Chefes"), "gold").pack(anchor="w")
+
+        self._section(root, "Mapa capítulo por capítulo", "TÓPICOS CONCLUÍDOS · PRÓXIMO TÓPICO · ETAPAS SELADAS")
+        by_chapter = {}
+        for m in missions:
+            by_chapter.setdefault(m["chapter_index"], []).append(m)
+        next_id = current["id"] if current else None
+        for chapter_idx, chapter_missions in by_chapter.items():
+            chapter_done = sum(m["id"] in completed for m in chapter_missions)
+            chapter_total = len(chapter_missions)
+            open_chapter = chapter_missions[0]["chapter_title"]
+            card = tk.Frame(root, bg=PANEL, highlightbackground=PURPLE if any(m["id"] == next_id for m in chapter_missions) else BORDER, highlightthickness=1)
+            card.pack(fill="x", pady=(0, 9))
+            head = tk.Frame(card, bg=PANEL); head.pack(fill="x", padx=14, pady=(11, 7))
+            tk.Label(head, text=f"{chapter_idx:02d}  ·  {open_chapter}", bg=PANEL, fg=TEXT, font=(FONT, 10, "bold"), wraplength=620, justify="left").pack(side="left", fill="x", expand=True)
+            tk.Label(head, text=f"{chapter_done}/{chapter_total}", bg=PANEL, fg=MINT if chapter_done == chapter_total else MUTED, font=(FONT, 8, "bold")).pack(side="right")
+            content = tk.Frame(card, bg=PANEL); content.pack(fill="x", padx=14, pady=(0, 11))
+            self._progress(content, chapter_done, chapter_total, MINT if chapter_done == chapter_total else PURPLE, 5).pack(fill="x", pady=(0, 7))
+            for m in chapter_missions:
+                is_done = m["id"] in completed
+                is_next = m["id"] == next_id
+                row = tk.Frame(content, bg="#201f30" if is_next else ("#15151e" if is_done else PANEL_2),
+                               highlightbackground=PURPLE if is_next else BORDER, highlightthickness=1 if is_next else 0)
+                row.pack(fill="x", pady=2)
+                mark = "✓" if is_done else ("▶" if is_next else "🔒")
+                tk.Label(row, text=mark, bg=row.cget("bg"), fg=MINT if is_done else (GOLD if is_next else "#777188"),
+                         width=3, font=(FONT, 9, "bold")).pack(side="left", padx=(3, 0), pady=7)
+                textf = tk.Frame(row, bg=row.cget("bg")); textf.pack(side="left", fill="x", expand=True, padx=4, pady=5)
+                tk.Label(textf, text=f"{m['global_index']:03d}. {m['title']}", bg=row.cget("bg"), fg=TEXT if (is_next or is_done) else "#8b869d",
+                         font=(FONT, 8, "bold"), anchor="w", wraplength=700, justify="left").pack(fill="x", anchor="w")
+                review = next((r for r in p.get("review_queue", []) if r.get("lesson_id") == m["id"] and not r.get("done")), None)
+                small_status = "Dominado" if is_done else ("Desbloqueado agora" if is_next else "Conclua os tópicos anteriores")
+                if is_done and review:
+                    small_status += " · revisão amanhã" if review.get("due_date", "") > date.today().isoformat() else " · revisão pendente"
+                tk.Label(textf, text=small_status, bg=row.cget("bg"), fg=MUTED, font=(FONT, 7), anchor="w").pack(fill="x", anchor="w", pady=(1, 0))
+                if is_done:
+                    self._button(row, "REVER", lambda lesson=m:self.start_lesson(lesson, replay=True), "secondary").pack(side="right", padx=7, pady=4)
+                elif is_next:
+                    self._button(row, "INICIAR", lambda lesson=m:self.start_lesson(lesson), "mint").pack(side="right", padx=7, pady=4)
+                else:
+                    self._button(row, "SELADO", lambda:None, "secondary", state="disabled").pack(side="right", padx=7, pady=4)
+
+    def start_lesson(self, lesson, replay=False):
+        p = self.profile
+        completed = set(p.get("completed_missions", []))
+        next_item = self.next_lesson()
+        if lesson["id"] not in completed and next_item and lesson["id"] != next_item["id"]:
+            messagebox.showinfo("Página selada", "A história é linear. Conclua o tópico atual e seu teste para abrir esta página.")
+            return
+        already_done = lesson["id"] in completed
+        waiting_boss = self.pending_guardian()
+        if not replay and not already_done and waiting_boss and lesson.get("global_index", 0) > waiting_boss.get("threshold", 0):
+            messagebox.showinfo("Guardião entre você e a próxima região", f"A próxima página ficará selada até você demonstrar domínio e derrotar {waiting_boss['name']}.")
+            self.navigate("Chefes")
+            return
+        if not replay and not already_done:
+            overdue = self.due_reviews()
+            if overdue and messagebox.askyesno(
+                "A Câmara da Memória chama",
+                f"Você tem {len(overdue)} recapitulação(ões) de dias anteriores. Quer reforçar a memória antes de abrir uma nova página?\n\n"
+                "Se escolher Não, a campanha continua normalmente; a revisão ficará disponível no menu Revisões.",
+                icon="question"):
+                self.navigate("Revisões")
+                return
+        win = tk.Toplevel(self)
+        win.title(f"Crônicas da Forja — {lesson['title']}")
+        win.geometry("850x650")
+        win.minsize(720, 560)
+        win.configure(bg=BG)
+        win.transient(self); win.grab_set()
+        shell = tk.Frame(win, bg=BG); shell.pack(fill="both", expand=True, padx=24, pady=20)
+
+        def clear_shell():
+            for child in shell.winfo_children(): child.destroy()
+
+        def draw_story():
+            clear_shell()
+            tk.Label(shell, text=f"CRÔNICAS DA FORJA  /  CAPÍTULO {lesson['chapter_index']:02d}", bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(shell, text=lesson["chapter_title"], bg=BG, fg=TEXT, font=(FONT, 20, "bold"), wraplength=780, justify="left").pack(anchor="w", pady=(7, 3))
+            tk.Label(shell, text=f"TÓPICO {lesson['global_index']:03d}  ·  {lesson['lesson_index']}/{lesson['lessons_in_chapter']}", bg=BG, fg=PURPLE, font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 16))
+            dialogue = lesson.get("story_intro", "Íria aponta para a próxima página.")
+            story_box = tk.Frame(shell, bg="#20172f", highlightbackground="#6b4c91", highlightthickness=1)
+            story_box.pack(fill="x", pady=(0, 18))
+            tk.Label(story_box, text="ÍRIA  /  NARRADORA", bg="#20172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(13, 5))
+            tk.Label(story_box, text=dialogue, bg="#20172f", fg="#e5dcef", font=(FONT, 10), wraplength=740, justify="left").pack(anchor="w", padx=16, pady=(0, 15))
+            tk.Label(shell, text="SEU OBJETIVO", bg=BG, fg=MINT, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(shell, text=lesson.get("success_criteria", "Explique o conceito e aplique-o em uma atividade."), bg=BG, fg=TEXT,
+                     font=(FONT, 10), wraplength=780, justify="left").pack(anchor="w", pady=(5, 15))
+            tk.Label(shell, text="Não é necessário decorar a narrativa. O importante é aprender o conteúdo e provar isso no teste.", bg=BG, fg=MUTED,
+                     font=(FONT, 9), wraplength=780, justify="left").pack(anchor="w")
+            footer = tk.Frame(shell, bg=BG); footer.pack(fill="x", side="bottom", pady=(16, 0))
+            self._button(footer, "VOLTAR À CAMPANHA", win.destroy, "secondary").pack(side="left")
+            self._button(footer, "AVANÇAR PARA A AULA  →", draw_study, "primary").pack(side="right")
+
+        def draw_study():
+            clear_shell()
+            tk.Label(shell, text=f"AULA GUIADA  /  {lesson['global_index']:03d}", bg=BG, fg=PURPLE, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(shell, text=lesson["title"], bg=BG, fg=TEXT, font=(FONT, 18, "bold"), wraplength=780, justify="left").pack(anchor="w", pady=(6, 12))
+            summary = tk.Frame(shell, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+            summary.pack(fill="x", pady=(0, 10))
+            tk.Label(summary, text="ROTEIRO DA MISSÃO", bg=PANEL, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", padx=15, pady=(12, 4))
+            tk.Label(summary, text=lesson.get("lesson_text", lesson.get("description", "")), bg=PANEL, fg=TEXT,
+                     font=(FONT, 9), wraplength=740, justify="left").pack(anchor="w", padx=15, pady=(0, 12))
+            tk.Label(shell, text="ATIVIDADE PRÁTICA — FAÇA ANTES DA PROVA", bg=BG, fg=MINT, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(shell, text=lesson.get("practice", "Estude o tópico na sua fonte principal e resolva um exemplo."), bg=BG, fg=MUTED,
+                     font=(FONT, 9), wraplength=780, justify="left").pack(anchor="w", pady=(4, 8))
+            tk.Label(shell, text="ANOTAÇÕES DESTA LIÇÃO (SALVAS LOCALMENTE)", bg=BG, fg=PURPLE, font=(FONT, 8, "bold")).pack(anchor="w")
+            notes = tk.Text(shell, height=4, bg=PANEL_2, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word", font=(FONT, 9), padx=10, pady=8)
+            notes.pack(fill="both", expand=True, pady=(5, 5))
+            notes.insert("1.0", p.get("lesson_notes", {}).get(lesson["id"], ""))
+            tk.Label(shell, text="Feche o material, explique o conceito sem consulta e só então confirme que concluiu a atividade.", bg=BG, fg=MUTED, font=(FONT, 8), wraplength=780, justify="left").pack(anchor="w", pady=(0, 4))
+            practiced = tk.BooleanVar(master=win, value=False)
+            check = tk.Checkbutton(shell, text="CONCLUÍ A ATIVIDADE E CONSIGO EXPLICAR O TÓPICO COM MINHAS PALAVRAS",
+                                   variable=practiced, bg=BG, fg=GOLD, selectcolor=PANEL_2, activebackground=BG,
+                                   activeforeground=GOLD, font=(FONT, 8, "bold"), anchor="w", justify="left")
+            check.pack(fill="x", pady=(3, 0))
+            footer = tk.Frame(shell, bg=BG); footer.pack(fill="x", side="bottom", pady=(9, 0))
+            self._button(footer, "VOLTAR À HISTÓRIA", draw_story, "secondary").pack(side="left")
+            if self.active_key == "python":
+                self._button(footer, "ABRIR CURSO NA UDEMY ↗", lambda:webbrowser.open("https://www.udemy.com/course/python-3-do-zero-ao-avancado/"), "secondary").pack(side="left", padx=(7, 0))
+            def begin_test():
+                if not practiced.get():
+                    messagebox.showinfo("Atividade pendente", "Marque a confirmação somente depois de realizar a atividade prática.", parent=win)
+                    return
+                p.setdefault("lesson_notes", {})[lesson["id"]] = notes.get("1.0", "end").strip()
+                self.save()
+                win.destroy()
+                self.run_quiz_dialog(
+                    f"Prova de domínio · {lesson['title']}",
+                    "Responda sem consultar. São necessárias 3 respostas corretas em 4 para dominar o tópico.",
+                    lesson.get("quiz", []), 3,
+                    lambda score:self.finish_lesson(lesson, score),
+                    retry_label="REFAZER A PROVA",
+                    on_return=lambda:self.start_lesson(lesson, replay=True),
+                )
+            test_button = self._button(footer, "PROVAR DOMÍNIO · 4 QUESTÕES →", begin_test, "primary", state="disabled")
+            test_button.pack(side="right")
+            def update_test_button(*_):
+                test_button.configure(state="normal" if practiced.get() else "disabled")
+            practiced.trace_add("write", update_test_button)
+
+        if replay or already_done:
+            draw_study()
+        else:
+            draw_story()
+
+    def run_quiz_dialog(self, title, subtitle, questions, required_correct, on_success, retry_label="TENTAR NOVAMENTE", on_return=None):
+        if not questions:
+            messagebox.showwarning("Teste indisponível", "Ainda não há questões suficientes para esta prova.")
+            return
+        questions = list(questions)
+        random.shuffle(questions)
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("760x570")
+        win.minsize(680, 500)
+        win.configure(bg=BG)
+        win.transient(self); win.grab_set()
+        state = {"index": 0, "score": 0, "answered": False}
+        host = tk.Frame(win, bg=BG); host.pack(fill="both", expand=True, padx=24, pady=20)
+
+        def clear():
+            for child in host.winfo_children(): child.destroy()
+
+        def draw_question():
+            clear(); state["answered"] = False
+            q = questions[state["index"]]
+            tk.Label(host, text="PROVA DE DOMÍNIO", bg=BG, fg=PURPLE, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(host, text=title, bg=BG, fg=TEXT, font=(FONT, 16, "bold"), wraplength=700, justify="left").pack(anchor="w", pady=(5, 3))
+            tk.Label(host, text=f"QUESTÃO {state['index']+1}/{len(questions)}  ·  ACERTOS ATÉ AGORA: {state['score']}", bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", pady=(0, 12))
+            tk.Label(host, text=q.get("q", "Explique o conceito estudado."), bg=PANEL, fg=TEXT, font=(FONT, 11, "bold"),
+                     wraplength=680, justify="left", padx=15, pady=15).pack(fill="x", pady=(0, 12))
+            choice = tk.IntVar(value=-1)
+            for i, option in enumerate(q.get("options", [])):
+                rb = tk.Radiobutton(host, text=f"{chr(65+i)}.  {option}", variable=choice, value=i, bg=BG, fg=TEXT, selectcolor=PANEL_2,
+                                    activebackground=BG, activeforeground=TEXT, font=(FONT, 9), wraplength=660, justify="left", anchor="w")
+                rb.pack(fill="x", anchor="w", pady=4)
+            feedback = tk.Label(host, text="", bg=BG, fg=MUTED, font=(FONT, 9), wraplength=680, justify="left")
+            feedback.pack(fill="x", pady=(12, 2))
+            footer = tk.Frame(host, bg=BG); footer.pack(fill="x", side="bottom", pady=(14, 0))
+            self._button(footer, "SAIR", win.destroy, "secondary").pack(side="left")
+            action = self._button(footer, "CONFIRMAR RESPOSTA", lambda:None, "primary")
+            action.pack(side="right")
+
+            def submit():
+                if not state["answered"]:
+                    selected = choice.get()
+                    if selected < 0:
+                        messagebox.showinfo("Escolha uma alternativa", "Selecione uma alternativa antes de confirmar.", parent=win)
+                        return
+                    state["answered"] = True
+                    correct = selected == q.get("a", 0)
+                    if correct: state["score"] += 1
+                    feedback.configure(text=("CORRETO. " if correct else f"RESPOSTA: {chr(65+q.get('a',0))}. ") + q.get("why", "Revise o conceito."), fg=MINT if correct else RED)
+                    action.configure(text="PRÓXIMA QUESTÃO  →", command=advance, bg=PURPLE)
+                else:
+                    advance()
+
+            def advance():
+                if state["index"] + 1 < len(questions):
+                    state["index"] += 1; draw_question()
+                else:
+                    draw_result()
+            action.configure(command=submit)
+
+        def draw_result():
+            clear()
+            total = len(questions); score = state["score"]
+            passed = score >= required_correct
+            tk.Label(host, text="SELO DE DOMÍNIO", bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(host, text="Prova concluída" if passed else "Ainda há névoa nesta página", bg=BG, fg=MINT if passed else RED,
+                     font=(FONT, 21, "bold")).pack(anchor="w", pady=(7, 5))
+            tk.Label(host, text=f"Resultado: {score}/{total}  ·  mínimo exigido: {required_correct}/{total}", bg=BG, fg=TEXT, font=(FONT, 12, "bold")).pack(anchor="w", pady=(0, 12))
+            msg = "Você demonstrou domínio suficiente para avançar. A próxima página da história está pronta." if passed else "Releia as explicações das questões e tente novamente. Seu progresso não será penalizado, mas a próxima página permanece selada."
+            tk.Label(host, text=msg, bg=PANEL, fg=MUTED, font=(FONT, 10), wraplength=680, justify="left", padx=15, pady=15).pack(fill="x")
+            footer = tk.Frame(host, bg=BG); footer.pack(fill="x", side="bottom", pady=(20, 0))
+            if passed:
+                def accept():
+                    win.destroy()
+                    on_success(score)
+                self._button(footer, "CONTINUAR A HISTÓRIA  →", accept, "mint").pack(side="right")
+            else:
+                def retry():
+                    state["index"] = 0; state["score"] = 0; random.shuffle(questions); draw_question()
+                self._button(footer, retry_label, retry, "primary").pack(side="right")
+                if on_return:
+                    self._button(footer, "VOLTAR AO ESTUDO", lambda:(win.destroy(), on_return()), "secondary").pack(side="left")
+                else:
+                    self._button(footer, "FECHAR", win.destroy, "secondary").pack(side="left")
+        draw_question()
+
+    def finish_lesson(self, lesson, score):
+        p = self.profile
+        lid = lesson["id"]
+        stats = p.setdefault("quiz_stats", {}).setdefault(lid, {"attempts": 0, "best": 0})
+        stats["attempts"] = safe_int(stats.get("attempts", 0)) + 1
+        stats["best"] = max(safe_int(stats.get("best", 0)), score)
+        stats["last_score"] = score
+        already_done = lid in p.get("completed_missions", [])
+        if not already_done:
+            p.setdefault("completed_missions", []).append(lid)
+            xp = safe_int(lesson.get("xp", 30)); gold = safe_int(lesson.get("coins", 10))
+            p["gold"] += gold
+            levels = self.gain_xp(xp)
+            self.update_streak()
+            p.setdefault("history", []).append({"date": date.today().isoformat(), "type": "lição", "title": lesson["title"], "xp": xp, "gold": gold, "score": score})
+            if not any(r.get("lesson_id") == lid for r in p.setdefault("review_queue", [])):
+                p["review_queue"].append({"id": f"review_{lid}", "lesson_id": lid, "title": lesson["title"], "topic": lesson["topic"],
+                                           "due_date": (date.today() + timedelta(days=1)).isoformat(), "done": False, "reward_claimed": False})
+            if lesson.get("is_chapter_start"):
+                seen = p.setdefault("story_chapters_seen", [])
+                if lesson["chapter_index"] not in seen: seen.append(lesson["chapter_index"])
+            self.status_var.set(f"Tópico dominado: {lesson['title']} · revisão marcada para amanhã.")
+        else:
+            xp = gold = 0; levels = 0
+            self.status_var.set(f"Tópico revisitado: {lesson['title']}. Nenhuma recompensa foi duplicada.")
+        self.save(); self.render()
+        w = tk.Toplevel(self); w.title("Fragmento conquistado"); w.geometry("620x400"); w.configure(bg=BG); w.transient(self); w.grab_set()
+        tk.Label(w, text="FRAGMENTO DA CRÔNICA", bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", padx=24, pady=(22, 8))
+        tk.Label(w, text="A página responde à sua coragem", bg=BG, fg=MINT if not already_done else TEXT, font=(FONT, 19, "bold"), wraplength=560, justify="left").pack(anchor="w", padx=24)
+        reward = "Tópico já conquistado. Seu registro e suas anotações continuam salvos." if already_done else f"+{xp} XP  ·  +{gold} ouro  ·  {score}/4 respostas corretas\nUma recapitulação foi agendada para {(date.today()+timedelta(days=1)).strftime('%d/%m/%Y')}."
+        if levels: reward += f"\n\nVocê subiu {levels} nível(is) e recebeu {levels*2} pontos de atributo."
+        tk.Label(w, text=reward, bg=PANEL, fg=TEXT, font=(FONT, 10), wraplength=540, justify="left", padx=14, pady=14).pack(fill="x", padx=24, pady=(14, 10))
+        line = lesson.get("story_outro", "Íria sorri e aponta para o mapa.")
+        if lesson.get("is_chapter_end"):
+            line += "\n\nCAPÍTULO CONCLUÍDO. O mapa registra que esta parte da jornada foi atravessada. Um guardião pode exigir uma prova maior antes da próxima grande passagem."
+        tk.Label(w, text=line, bg=BG, fg=MUTED, font=(FONT, 9), wraplength=560, justify="left").pack(anchor="w", padx=24, pady=(0, 10))
+        pending = self.pending_guardian()
+        if pending:
+            self._button(w, "AVANÇAR PARA A PROVA DO GUARDIÃO  ⚔", lambda:(w.destroy(), self.navigate("Chefes")), "danger").pack(anchor="e", padx=24, pady=(3, 20))
+        else:
+            self._button(w, "RETOMAR A CAMPANHA  →", w.destroy, "primary").pack(anchor="e", padx=24, pady=(3, 20))
+
+    # -------------------------- NEXT-DAY REVIEWS --------------------------
+    def page_reviews(self):
+        root = self.build_scroll_page()
+        p = self.profile
+        today = date.today().isoformat()
+        due = self.due_reviews()
+        future = sorted([r for r in p.get("review_queue", []) if not r.get("done") and r.get("due_date", "") > today], key=lambda x:x.get("due_date", ""))
+        done_count = sum(1 for r in p.get("review_queue", []) if r.get("done"))
+        card = self._card(root, "A Câmara da Memória", "REPETIÇÃO ESPAÇADA · REVISÃO NO DIA SEGUINTE")
+        card.pack(fill="x", pady=(0, 14))
+        body = tk.Frame(card, bg=PANEL); body.pack(fill="x", padx=16, pady=(0, 16))
+        tk.Label(body, text=f"{len(due)} revisão(ões) vencida(s) hoje  ·  {len(future)} agendada(s)  ·  {done_count} já revisada(s)", bg=PANEL,
+                 fg=GOLD if due else TEXT, font=(FONT, 11, "bold")).pack(anchor="w", pady=(0, 6))
+        tk.Label(body, text="Cada tópico concluído volta no dia seguinte. O teste é curto e sem consulta; se não passar, você pode tentar de novo sem perder XP nem progresso.", bg=PANEL, fg=MUTED,
+                 font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w")
+
+        self._section(root, "Revisões que já venceram", "PRIORIDADE DE HOJE")
+        if not due:
+            empty = self._card(root, "Nenhuma revisão pendente", "A CÂMARA ESTÁ EM PAZ")
+            empty.pack(fill="x", pady=(0, 14))
+            tk.Label(empty, text="Continue a campanha. As revisões dos tópicos concluídos aparecerão automaticamente no dia seguinte.", bg=PANEL, fg=MUTED,
+                     font=(FONT, 9), wraplength=880, justify="left").pack(anchor="w", padx=16, pady=(0, 14))
+        for review in due:
+            self._review_card(root, review, due_now=True)
+        self._section(root, "Revisões futuras", "SERÃO LIBERADAS NA DATA INDICADA")
+        for review in future[:30]:
+            self._review_card(root, review, due_now=False)
+
+    def _review_card(self, parent, review, due_now):
+        card = tk.Frame(parent, bg=PANEL, highlightbackground=GOLD if due_now else BORDER, highlightthickness=1)
+        card.pack(fill="x", pady=(0, 8))
+        body = tk.Frame(card, bg=PANEL); body.pack(fill="x", padx=14, pady=11)
+        tk.Label(body, text=review.get("topic", "Recapitulação"), bg="#29213a", fg=PURPLE, font=(FONT, 7, "bold"), padx=7, pady=3).pack(anchor="w")
+        tk.Label(body, text=review.get("title", "Revisão de tópico"), bg=PANEL, fg=TEXT, font=(FONT, 10, "bold"), wraplength=650, justify="left").pack(anchor="w", pady=(5, 3))
+        tk.Label(body, text=f"Data: {review.get('due_date','')} · 3 questões · precisa acertar 2/3", bg=PANEL, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
+        if due_now:
+            self._button(body, "INICIAR RECAPITULAÇÃO  ↻", lambda r=review:self.start_review(r), "gold").pack(anchor="e", pady=(7, 0))
+        else:
+            self._button(body, "AGUARDANDO DATA", lambda:None, "secondary", state="disabled").pack(anchor="e", pady=(7, 0))
+
+    def start_review(self, review):
+        if review.get("done"):
+            messagebox.showinfo("Revisão concluída", "Esta recapitulação já foi concluída.")
+            return
+        if review.get("due_date", "9999") > date.today().isoformat():
+            messagebox.showinfo("Ainda não é o dia", f"Esta recapitulação estará disponível em {review['due_date']}.")
+            return
+        lesson = self.lesson_by_id(review.get("lesson_id", ""))
+        if not lesson:
+            messagebox.showwarning("Tópico não encontrado", "O tópico desta revisão não existe mais na trilha atual.")
+            return
+        questions = list(lesson.get("quiz", []))
+        random.shuffle(questions)
+        questions = questions[:3]
+        self.run_quiz_dialog(
+            f"Recapitulação · {lesson['title']}", "Recupere de memória o que estudou ontem. São necessárias 2 respostas corretas em 3.",
+            questions, 2, lambda score:self.finish_review(review, lesson, score), retry_label="TENTAR A REVISÃO NOVAMENTE",
+        )
+
+    def finish_review(self, review, lesson, score):
+        p = self.profile
+        review["done"] = True
+        review["reviewed_at"] = date.today().isoformat()
+        review["score"] = score
+        xp = 12 if not review.get("reward_claimed") else 0
+        gold = 5 if not review.get("reward_claimed") else 0
+        review["reward_claimed"] = True
+        p["gold"] += gold
+        levels = self.gain_xp(xp)
+        self.update_streak()
+        p.setdefault("history", []).append({"date":date.today().isoformat(), "type":"revisão", "title":lesson["title"], "xp":xp, "gold":gold, "score":score})
+        self.save(); self.render()
+        msg = f"Recapitulação concluída: {score}/3.\n+{xp} XP · +{gold} ouro."
+        if levels: msg += f"\nVocê subiu {levels} nível(is)!"
+        self.status_var.set(f"Memória reforçada: {lesson['title']}.")
+        messagebox.showinfo("Memória reforçada", msg)
+
     # -------------------------------- BOSSES -------------------------------
     def page_bosses(self):
         root = self.build_scroll_page()
@@ -657,7 +1132,8 @@ class HunterSystem(tk.Tk):
         tk.Label(hb, text=f"Seu poder atual: {self.attack_stat()} ATQ  ·  {self.defense_stat()} DEF  ·  {self.max_hp()} HP    |    Missões: {count}/{self.total_missions()}", bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(anchor="w", pady=(4, 0))
         for i, boss in enumerate(p["boss_data"]):
             defeated = boss["id"] in p["bosses_defeated"]
-            unlocked = count >= boss["threshold"]
+            previous_defeated = i == 0 or p["boss_data"][i-1]["id"] in p.get("bosses_defeated", [])
+            unlocked = count >= boss["threshold"] and previous_defeated
             card = tk.Frame(root, bg=PANEL if unlocked else "#12121b", highlightbackground=GOLD if defeated else (PURPLE if unlocked else BORDER), highlightthickness=1)
             card.pack(fill="x", pady=(0, 11))
             main = tk.Frame(card, bg=card.cget("bg")); main.pack(fill="x", padx=17, pady=15)
@@ -672,9 +1148,43 @@ class HunterSystem(tk.Tk):
             if defeated:
                 self._button(main, "VITÓRIA  ✓", lambda:None, "mint", state="disabled").pack(side="right", padx=(8,0))
             elif unlocked:
-                self._button(main, "ENTRAR NO DUELO  →", lambda b=boss:self.fight_boss(b), "danger").pack(side="right", padx=(8,0))
+                self._button(main, "PROVAR DOMÍNIO  →", lambda b=boss:self.start_boss_exam(b), "danger").pack(side="right", padx=(8,0))
             else:
                 self._button(main, "BLOQUEADO", lambda:None, "secondary", state="disabled").pack(side="right", padx=(8,0))
+
+    def start_boss_exam(self, boss):
+        """Require a cumulative knowledge check before opening the turn-based boss fight."""
+        p = self.profile
+        completed = set(p.get("completed_missions", []))
+        pool, seen = [], set()
+        for lesson in p.get("mission_data", []):
+            if lesson.get("id") not in completed:
+                continue
+            for question in lesson.get("quiz", []):
+                key = question.get("q", "")
+                if key and key not in seen:
+                    seen.add(key)
+                    pool.append(dict(question))
+            if lesson.get("global_index", 0) >= boss.get("threshold", 0):
+                break
+        if not pool:
+            messagebox.showinfo("Prova ainda não disponível", "Conclua os tópicos exigidos antes de fazer a prova do guardião.")
+            return
+        random.shuffle(pool)
+        questions = pool[:min(5, len(pool))]
+        needed = max(1, (len(questions) * 4 + 4) // 5)
+        def passed(score):
+            p.setdefault("boss_exam_results", {})[boss["id"]] = {
+                "date": date.today().isoformat(), "score": score, "total": len(questions), "passed": True
+            }
+            self.save()
+            messagebox.showinfo("Selo aceito", f"Você acertou {score}/{len(questions)}. O guardião aceitou sua prova. Prepare-se para o combate.")
+            self.fight_boss(boss)
+        self.run_quiz_dialog(
+            f"Prova do guardião · {boss['name']}",
+            f"Revisão cumulativa de tudo que você concluiu. É necessário acertar {needed} de {len(questions)} para abrir a batalha.",
+            questions, needed, passed, retry_label="REFAZER A PROVA",
+        )
 
     def fight_boss(self, boss):
         p = self.profile
@@ -1058,12 +1568,12 @@ class HunterSystem(tk.Tk):
         topics_text=tk.Text(cb,height=8,bg=PANEL_2,fg=TEXT,insertbackground=TEXT,relief="flat",wrap="word",font=(FONT,9),padx=8,pady=7)
         topics_text.pack(fill="x")
         topics_text.insert("1.0","\n".join(s.get("topics",[])))
-        tk.Label(cb,text="Se você alterar a lista de temas, novas missões genéricas serão montadas para cada tema (teoria, prática/questões e revisão). Missões já concluídas serão preservadas quando os IDs continuarem iguais.",bg=PANEL,fg=MUTED,font=(FONT,8),wraplength=900,justify="left").pack(anchor="w",pady=(6,12))
+        tk.Label(cb,text="Se alterar os temas, o aplicativo cria cinco páginas guiadas para cada tema: definir objetivo, estudar, praticar com apoio, aplicar sem consulta e explicar/consolidar. Cada página tem história, teste de domínio e recapitulação no dia seguinte.",bg=PANEL,fg=MUTED,font=(FONT,8),wraplength=900,justify="left").pack(anchor="w",pady=(6,12))
         tk.Label(cb,text="Missões personalizadas (opcional)",bg=PANEL,fg=MUTED,font=(FONT,8,"bold")).pack(anchor="w",pady=(0,4))
         missions_text=tk.Text(cb,height=6,bg=PANEL_2,fg=TEXT,insertbackground=TEXT,relief="flat",wrap="word",font=("Consolas",9),padx=8,pady=7)
         missions_text.pack(fill="x")
         missions_text.insert("1.0",s.get("missions_text",""))
-        tk.Label(cb,text="Uma missão por linha: TEMA | TÍTULO | DESCRIÇÃO | XP | OURO. Se deixar vazio, a trilha gera três missões por tema.",bg=PANEL,fg=MUTED,font=(FONT,8),wraplength=900,justify="left").pack(anchor="w",pady=(5,0))
+        tk.Label(cb,text="Uma etapa por linha: TEMA | TÍTULO | DESCRIÇÃO | XP | OURO. Cada linha vira uma página com prova de domínio e revisão no dia seguinte. Se deixar vazio, cada tema gera cinco páginas guiadas.",bg=PANEL,fg=MUTED,font=(FONT,8),wraplength=900,justify="left").pack(anchor="w",pady=(5,0))
 
         bosses=self._card(root,"Chefes e história","UM GUARDIÃO POR LINHA")
         bosses.pack(fill="x",pady=(0,14))
@@ -1079,7 +1589,6 @@ class HunterSystem(tk.Tk):
         qtext.pack(fill="x");qtext.insert("1.0",p.get("custom_quiz_text",""))
         tk.Label(qbox,text="Uma questão por linha: TEMA | PERGUNTA | OPÇÃO A | OPÇÃO B | OPÇÃO C | OPÇÃO D | GABARITO A/B/C/D | EXPLICAÇÃO. Use | como separador e evite esse caractere no texto.",bg=PANEL,fg=MUTED,font=(FONT,8),wraplength=900,justify="left").pack(anchor="w",pady=(5,0))
 
-        actions=tk.Frame(root,bg=BG);actions.pack(fill="x",pady=(0,15))
         def apply_settings():
             old_topics=s.get("topics",[])
             new_topics=[line.strip() for line in topics_text.get("1.0","end").splitlines() if line.strip()]
@@ -1091,16 +1600,40 @@ class HunterSystem(tk.Tk):
             old_missions=p["mission_data"]
             if custom_lines:
                 new_missions=[]
-                for i,line in enumerate(custom_lines.splitlines(),1):
-                    if not line.strip() or line.strip().startswith("#"):continue
+                lines=[line for line in custom_lines.splitlines() if line.strip() and not line.strip().startswith("#")]
+                for i,line in enumerate(lines,1):
                     parts=[x.strip() for x in line.split("|")]
                     if len(parts)<5:
                         messagebox.showwarning("Formato de missão",f"Linha {i} precisa ter: TEMA | TÍTULO | DESCRIÇÃO | XP | OURO.");return
-                    new_missions.append({"id":f"user_{i}","topic":parts[0],"title":parts[1],"description":parts[2],"xp":max(0,safe_int(parts[3],30)),"coins":max(0,safe_int(parts[4],10)),"kind":"study"})
+                    topic,title,description=parts[0],parts[1],parts[2]
+                    template=build_campaign_missions("custom",[topic])[0]
+                    item=dict(template)
+                    item["id"]=f"user_{i}"
+                    item["chapter_title"]=topic; item["chapter_index"]=i; item["chapter_total"]=len(lines)
+                    item["lesson_index"]=1; item["lessons_in_chapter"]=1; item["global_index"]=i
+                    item["chapter_last_lesson_id"]=item["id"]; item["is_chapter_start"]=True; item["is_chapter_end"]=True
+                    item["boss_checkpoint"]=i in chapter_boss_thresholds([{"global_index":j+1,"is_chapter_end":True} for j in range(len(lines))],5)
+                    item["topic"]=topic; item["title"]=title; item["description"]=description
+                    item["lesson_text"]=f"IDEIA-CHAVE\n{description}\n\nPOR QUE ISSO IMPORTA\nConecte a ideia ao material principal e explique-a com suas palavras."
+                    item["practice"]=description; item["success_criteria"]=f"Você consegue explicar '{title}' e demonstrar a competência sem apenas copiar."
+                    item["story_intro"]=f"Íria abre o capítulo {i}: '{title}'. A passagem só se abrirá depois que você demonstrar o que aprendeu."
+                    item["story_outro"]=f"O selo de '{title}' se acende. Mais um fragmento da sua jornada foi conquistado."
+                    item["xp"]=max(0,safe_int(parts[3],30)); item["coins"]=max(0,safe_int(parts[4],10))
+                    # If a custom question has the same subject/topic, use it for this lesson's mastery test.
+                    matching=[]
+                    for qi,qline in enumerate(qtext.get("1.0","end").splitlines(),1):
+                        if not qline.strip() or qline.strip().startswith("#"): continue
+                        qparts=[x.strip() for x in qline.split("|")]
+                        if len(qparts)>=8 and qparts[0].casefold()==topic.casefold() and qparts[6].upper() in "ABCD":
+                            matching.append({"id":f"customq{qi}","subject":qparts[0],"q":qparts[1],"options":qparts[2:6],"a":"ABCD".index(qparts[6].upper()),"why":qparts[7]})
+                    if matching:item["quiz"]=matching[:4]
+                    new_missions.append(item)
                 if not new_missions:
                     messagebox.showwarning("Missões vazias","Não encontrei missões válidas.");return
                 p["mission_data"]=new_missions
-                p["completed_missions"]=[mid for mid in p["completed_missions"] if mid in {m["id"] for m in new_missions}]
+                valid={m["id"] for m in new_missions}
+                p["completed_missions"]=[mid for mid in p["completed_missions"] if mid in valid]
+                p["review_queue"]=[r for r in p.get("review_queue",[]) if r.get("lesson_id") in valid]
             elif new_topics != old_topics:
                 p["mission_data"]=self.make_generic_missions(new_topics)
                 p["completed_missions"]=[mid for mid in p["completed_missions"] if mid in {m["id"] for m in p["mission_data"]}]
@@ -1122,52 +1655,188 @@ class HunterSystem(tk.Tk):
             self.save();self.render()
             self.status_var.set("Configurações da jornada salvas.")
             messagebox.showinfo("Configuração salva","Sua campanha foi atualizada. O progresso das missões cujos IDs foram mantidos continua salvo.")
-        self._button(actions,"SALVAR PERSONALIZAÇÃO  ✓",apply_settings,"primary").pack(side="left",padx=(0,8))
-        self._button(actions,"EXPORTAR SAVE JSON",self.export_save,"secondary").pack(side="left",padx=(0,8))
-        self._button(actions,"IMPORTAR SAVE JSON",self.import_save,"secondary").pack(side="left")
+        row1=tk.Frame(root,bg=BG);row1.pack(fill="x",pady=(0,8))
+        row2=tk.Frame(root,bg=BG);row2.pack(fill="x",pady=(0,15))
+        self._button(row1,"SALVAR PERSONALIZAÇÃO  ✓",apply_settings,"primary").pack(side="left",padx=(0,8))
+        self._button(row1,"BACKUP COMPLETO ZIP  ↓",self.export_full_backup,"gold").pack(side="left",padx=(0,8))
+        self._button(row1,"IMPORTAR ZIP / JSON  ↑",self.import_save,"secondary").pack(side="left",padx=(0,8))
+        self._button(row2,"EXPORTAR SAVE JSON",self.export_save,"secondary").pack(side="left",padx=(0,8))
+        self._button(row2,"REINICIAR / APAGAR PROGRESSO DESTE SLOT",self.reset_active_profile,"danger").pack(side="left",padx=(0,8))
 
     def make_generic_missions(self,topics):
-        suffixes=PYTHON_MISSION_SUFFIXES if self.active_key=="python" else CAIXA_MISSION_SUFFIXES
-        missions=[]
-        for i,topic in enumerate(topics):
-            for j,(verb,how,xp,coins) in enumerate(suffixes):
-                missions.append({"id":f"custom_{i+1}_{j+1}","topic":topic,"title":f"{topic}: {verb}","description":how,"xp":xp,"coins":coins,"kind":"study"})
-        return missions
+        return build_campaign_missions("custom", topics)
+
+    def _write_safety_backup(self, tag="safety"):
+        """Write a complete local save copy before a destructive operation."""
+        folder = self.save_file.parent / "backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = folder / f"hunter_system_{tag}_{stamp}.json"
+        path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def export_full_backup(self):
+        """Export all three slots and the manifest in one portable ZIP."""
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = filedialog.asksaveasfilename(
+            title="Salvar backup completo", defaultextension=".zip",
+            filetypes=[("Backup completo Hunter System", "*.zip")],
+            initialfile=f"HunterSystem_Backup_Completo_{stamp}.zip")
+        if not path:
+            return
+        try:
+            save_json = json.dumps(self.data, ensure_ascii=False, indent=2).encode("utf-8")
+            manifest = {
+                "application": APP_NAME, "format_version": 1,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "active_profile": self.active_key,
+                "profiles": {
+                    key: {"title": profile.get("settings", {}).get("title", key),
+                          "completed_topics": len(profile.get("completed_missions", [])),
+                          "total_topics": len(profile.get("mission_data", []))}
+                    for key, profile in self.data.get("profiles", {}).items()
+                },
+                "contents": ["save.json", "manifest.json"],
+            }
+            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("save.json", save_json)
+                archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            messagebox.showinfo("Backup completo criado", f"Os três slots, anotações, inventário, revisões e histórico foram incluídos.\n\nArquivo:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Erro ao criar backup", f"Não foi possível criar o ZIP.\n\n{exc}")
 
     def export_save(self):
-        path=filedialog.asksaveasfilename(title="Exportar save",defaultextension=".json",filetypes=[("Arquivo JSON","*.json")],initialfile="hunter_system_save.json")
+        path=filedialog.asksaveasfilename(title="Exportar save JSON",defaultextension=".json",filetypes=[("Arquivo JSON","*.json")],initialfile="hunter_system_save.json")
         if not path:return
         try:
             with open(path,"w",encoding="utf-8") as f:json.dump(self.data,f,ensure_ascii=False,indent=2)
-            messagebox.showinfo("Exportado",f"Backup salvo em:\n{path}")
+            messagebox.showinfo("Exportado",f"Save JSON salvo em:\n{path}")
         except Exception as exc:messagebox.showerror("Erro ao exportar",str(exc))
 
-    def import_save(self):
-        path=filedialog.askopenfilename(title="Importar save",filetypes=[("Arquivo JSON","*.json")])
-        if not path:return
-        if not messagebox.askyesno("Substituir progresso?","A importação substituirá o progresso atual nos slots. Recomenda-se exportar um backup antes. Continuar?"):return
+    def reset_active_profile(self):
+        """Reset only the active slot; always make a whole-save safety copy first."""
+        p = self.profile
+        title = p.get("settings", {}).get("title", self.active_key)
+        confirm = messagebox.askyesno(
+            "Apagar progresso deste slot?",
+            f"Isso vai reiniciar somente o slot atual:\n\n{title}\n\n"
+            "O personagem, XP, ouro, itens, capítulos concluídos, revisões, anotações e personalizações deste slot serão apagados.\n"
+            "Os outros dois slots não serão alterados. Um backup de segurança será criado automaticamente.\n\nDeseja continuar?",
+            icon="warning")
+        if not confirm:
+            return
         try:
-            with open(path,"r",encoding="utf-8") as f:incoming=json.load(f)
-            if not isinstance(incoming,dict) or not isinstance(incoming.get("profiles"),dict):raise ValueError("Formato de save inválido.")
+            backup = self._write_safety_backup(f"antes_reiniciar_{self.active_key}")
+            self.data["profiles"][self.active_key] = default_profile(self.active_key)
+            self.save()
+            self.current_question = None
+            self.current_answered = False
+            self.page = "Santuário"
+            self.render()
+            self.status_var.set(f"Slot reiniciado. Backup de segurança em {backup}")
+            messagebox.showinfo("Slot reiniciado", f"A jornada foi reiniciada. Os demais slots continuam intactos.\n\nBackup automático:\n{backup}")
+        except Exception as exc:
+            messagebox.showerror("Erro ao reiniciar slot", f"O progresso não foi reiniciado com segurança.\n\n{exc}")
+
+    def _upgrade_imported_profile(self, key, candidate, seed):
+        """Merge a profile from a backup with this version's schema without trusting missing fields."""
+        if not isinstance(candidate, dict):
+            raise ValueError(f"O slot '{key}' não contém um perfil válido.")
+        normalized = dict(seed)
+        schema = safe_int(candidate.get("campaign_schema", 0))
+        if schema < 3:
+            old_done = set(candidate.get("completed_missions", []))
+            old_bosses = set(candidate.get("bosses_defeated", []))
+            for field in ("level", "xp", "gold", "attributes", "attribute_points", "inventory", "equipped", "potions", "last_study_date", "streak", "history", "event_claims", "notes", "custom_quiz_text", "settings", "lesson_notes", "quiz_stats", "story_seen", "story_chapters_seen", "boss_exam_results"):
+                if field in candidate:
+                    normalized[field] = candidate[field]
+            valid_ids = {m["id"] for m in seed["mission_data"]}
+            valid_boss_ids = {b["id"] for b in seed["boss_data"]}
+            normalized["completed_missions"] = [mid for mid in old_done if mid in valid_ids]
+            normalized["bosses_defeated"] = [bid for bid in old_bosses if bid in valid_boss_ids]
+            normalized["review_queue"] = [r for r in candidate.get("review_queue", []) if isinstance(r, dict) and r.get("lesson_id") in valid_ids]
+            normalized["mission_data"] = seed["mission_data"]
+            normalized["boss_data"] = seed["boss_data"]
+        else:
+            normalized.update(candidate)
+        for field, default_value in seed.items():
+            normalized.setdefault(field, default_value)
+        if not isinstance(normalized.get("mission_data"), list) or not normalized["mission_data"]:
+            normalized["mission_data"] = seed["mission_data"]
+        known_ids = {m.get("id") for m in normalized["mission_data"]}
+        normalized["completed_missions"] = [mid for mid in normalized.get("completed_missions", []) if mid in known_ids]
+        normalized["review_queue"] = [r for r in normalized.get("review_queue", []) if isinstance(r, dict) and r.get("lesson_id") in known_ids]
+        normalized["campaign_schema"] = 3
+        return normalized
+
+    def import_save(self):
+        path=filedialog.askopenfilename(title="Importar backup completo ou save",filetypes=[("Backup completo ZIP", "*.zip"), ("Save JSON", "*.json"), ("Todos os arquivos", "*.*")])
+        if not path:return
+        if not messagebox.askyesno("Substituir progresso?","O arquivo substituirá os três slots do aplicativo. Antes da importação, será criado um backup local de segurança. Continuar?", icon="warning"):return
+        try:
+            if str(path).lower().endswith(".zip"):
+                with zipfile.ZipFile(path, "r") as archive:
+                    if "save.json" not in archive.namelist():
+                        raise ValueError("Este ZIP não contém save.json e não parece ser um backup Hunter System válido.")
+                    incoming = json.loads(archive.read("save.json").decode("utf-8"))
+            else:
+                with open(path,"r",encoding="utf-8") as f:incoming=json.load(f)
+            if not isinstance(incoming,dict) or not isinstance(incoming.get("profiles"),dict):
+                raise ValueError("Formato de save inválido: a seção profiles não foi encontrada.")
+            safety = self._write_safety_backup("antes_importar")
             fresh=create_save()
             for key in ("python","caixa","custom"):
-                if key in incoming["profiles"]:fresh["profiles"][key]=incoming["profiles"][key]
-            fresh["active_profile"]=incoming.get("active_profile","python")
-            self.data=fresh;self.active_key=fresh["active_profile"] if fresh["active_profile"] in fresh["profiles"] else "python"
-            self.save();self.render();messagebox.showinfo("Importado","Progresso importado com sucesso.")
-        except Exception as exc:messagebox.showerror("Erro ao importar",f"Arquivo inválido ou incompatível.\n\n{exc}")
+                if key in incoming["profiles"]:
+                    fresh["profiles"][key] = self._upgrade_imported_profile(key, incoming["profiles"][key], fresh["profiles"][key])
+            active = incoming.get("active_profile", "python")
+            fresh["active_profile"] = active if active in fresh["profiles"] else "python"
+            self.data=fresh
+            self.active_key=fresh["active_profile"]
+            self.current_question = None
+            self.current_answered = False
+            self.save();self.render()
+            messagebox.showinfo("Backup importado",f"Progresso restaurado com sucesso.\n\nBackup de segurança do save anterior:\n{safety}")
+        except Exception as exc:messagebox.showerror("Erro ao importar",f"Arquivo inválido ou incompatível. O aplicativo manteve o save atual se a validação falhou.\n\n{exc}")
 
     # ------------------------------- STORY ---------------------------------
     def show_story(self, scene, replay=False):
         p=self.profile
         lines=STORY.get(scene)
+        if scene == "intro" and self.active_key == "caixa":
+            lines = [("ÍRIA, arquivista", "O Arquivo dos Ecos guarda leis, números, escolhas e promessas feitas a pessoas que precisam de respostas claras. A névoa não apaga as páginas: ela mistura conceitos até parecerem iguais."), ("ÍRIA, arquivista", "Você seguirá uma rota de leitura, cálculo, ética, sistema financeiro e atendimento. O mapa segue o edital de 2024 que você forneceu; confirme sempre o conteúdo de uma seleção futura em fontes oficiais."), ("VOCÊ", "Não quero só reconhecer as palavras. Quero justificar as respostas."), ("ÍRIA, arquivista", "Então cada página terminará com uma prova. Amanhã, a memória será chamada novamente. E, ao fim de cada região, um guardião reunirá os assuntos que você já atravessou.")]
+        elif scene == "intro" and self.active_key == "custom":
+            lines = [("ÍRIA", "Este mapa ainda não tem nome nem destino. É você quem escolhe o que merece ser aprendido."), ("VOCÊ", "E se a rota mudar?"), ("ÍRIA", "Então reescrevemos a próxima página. Mas seguimos em ordem: entender, praticar, demonstrar e revisitar. A campanha pertence a você, não o contrário.")]
+        if scene.startswith("boss_"):
+            idx = safe_int(scene.split("_")[-1], 1)
+            if self.active_key == "python":
+                boss_lines = {
+                    1: [("ÍRIA", "A primeira barreira caiu. O guardião tentou confundir sintaxe com compreensão, mas você demonstrou que consegue ler o código e explicar por que ele funciona."), ("ECO", "A próxima porta exigirá que funções e objetos cooperem. Uma solução isolada não basta."), ("VOCÊ", "Então vou construir ferramentas, não apenas decorar comandos.")],
+                    2: [("ÍRIA", "A Arquiteta dos Módulos recuou. Você aprendeu a dar responsabilidade a cada parte do sistema."), ("ECO", "Os dados ainda podem se perder. Erros escondidos também podem passar despercebidos."), ("VOCÊ", "Vou proteger os registros e provar meu código com testes.")],
+                    3: [("ÍRIA", "O Devorador de Dados perdeu o controle. Persistência e testes transformam uma demonstração frágil em algo verificável."), ("ECO", "Uma aplicação não vive só no laboratório."), ("VOCÊ", "Ainda preciso aprender a entregar, integrar e manter o que construí.")],
+                    4: [("ÍRIA", "A Sombra de Produção foi vencida. Você já não encara uma aplicação como um arquivo solto, mas como um sistema que precisa ser explicado e mantido."), ("ECO", "O último guardião não aceitará um amontoado de aulas assistidas."), ("VOCÊ", "Vou reunir tudo em um projeto que funcione.")],
+                }
+                lines = boss_lines.get(idx, lines)
+            elif self.active_key == "caixa":
+                boss_lines = {
+                    1: [("ÍRIA", "Você atravessou a primeira prova: leu enunciados com cuidado e evitou alternativas que apenas pareciam corretas."), ("ECO", "Os números não aceitarão aproximações feitas sem identificar taxa, prazo e regime."), ("VOCÊ", "Vou explicitar as premissas antes de calcular.")],
+                    2: [("ÍRIA", "A Balança do Capital se equilibrou porque você separou conceitos, fórmulas e hipóteses."), ("ECO", "A próxima passagem não se resolve com cálculo; ela exige responsabilidade."), ("VOCÊ", "Conhecimento sem ética não abre o cofre.")],
+                    3: [("ÍRIA", "O Guardião do Sigilo recuou. Você entendeu que privacidade, integridade e controle fazem parte do trabalho bancário."), ("ECO", "Agora o sistema inteiro será posto à prova: instituições, produtos, canais e atendimento."), ("VOCÊ", "Vou ligar cada conceito à situação em que ele se aplica.")],
+                    4: [("ÍRIA", "A Serpente dos Mercados perdeu a última escama. Os conceitos agora formam uma rota, não uma lista solta."), ("ECO", "A prova final reúne memória, análise, atendimento e escrita."), ("VOCÊ", "Vou recuperar o que sei, identificar o que falta e enfrentar a última página.")],
+                }
+                lines = boss_lines.get(idx, lines)
+        elif scene == "ending" and self.active_key == "python":
+            lines = [("REI DO CÓDIGO INACABADO", "Você voltou a cada etapa, testou suas hipóteses e transformou pequenas práticas num projeto demonstrável."), ("ÍRIA", "O curso não termina quando o último vídeo acaba. Termina esta campanha quando você consegue usar o que aprendeu sem depender da demonstração."), ("NARRADOR", "A Forja se apaga porque a chama agora pertence a você. A próxima missão será escolhida por quem aprendeu a construir.")]
+        elif scene == "ending" and self.active_key == "caixa":
+            lines = [("EXAMINADOR DA ÚLTIMA PROVA", "Você não venceu por reconhecer palavras. Venceu ao recuperar conceitos, justificar respostas e organizar argumentos."), ("ÍRIA", "O edital anexado foi o mapa desta campanha, não uma promessa sobre concursos futuros. Continue acompanhando regras e conteúdos oficiais quando uma nova seleção for publicada."), ("NARRADOR", "O cofre abre. A jornada de estudo continua, mas agora você sabe medir o próprio avanço.")]
         if not lines:
             lines=[("ÍRIA","A próxima página ainda não foi escrita. Continue sua jornada e volte depois.")]
         w=tk.Toplevel(self);w.title("Crônicas da Cidade Sem Aurora")
         w.geometry("650x430");w.resizable(False,False);w.configure(bg="#100e18");w.transient(self);w.grab_set()
         canvas=tk.Canvas(w,width=650,height=5,bg=PURPLE,highlightthickness=0);canvas.pack(fill="x")
-        tk.Label(w,text="CRÔNICAS  /  CIDADE SEM AURORA",bg="#100e18",fg=GOLD,font=(FONT,8,"bold")).pack(anchor="w",padx=28,pady=(24,8))
-        tk.Label(w,text={"intro":"A CHAMA QUE RESTOU","boss_1":"A PRIMEIRA PORTA","boss_2":"A MEMÓRIA DA NÉVOA","boss_3":"O MAPA INVISÍVEL","boss_4":"A ÚLTIMA PONTE","ending":"O FIM DA ÚLTIMA PÁGINA"}.get(scene,"UM FRAGMENTO DA CRÔNICA"),bg="#100e18",fg=TEXT,font=(FONT,18,"bold")).pack(anchor="w",padx=28)
+        story_banner = {"python":"CRÔNICAS  /  CIDADE SEM AURORA", "caixa":"ARQUIVO DOS ECOS  /  ROTA BANCÁRIA", "custom":"JORNADA LIVRE  /  MAPA EM BRANCO"}.get(self.active_key, "CRÔNICAS DA FORJA")
+        story_title = {"intro":"A CHAMA QUE RESTOU" if self.active_key == "python" else ("O ARQUIVO DOS ECOS" if self.active_key == "caixa" else "O MAPA EM BRANCO"),"boss_1":"A PRIMEIRA PORTA","boss_2":"A MEMÓRIA DA NÉVOA","boss_3":"O MAPA INVISÍVEL","boss_4":"A ÚLTIMA PONTE","ending":"O FIM DA ÚLTIMA PÁGINA"}.get(scene,"UM FRAGMENTO DA CRÔNICA")
+        tk.Label(w,text=story_banner,bg="#100e18",fg=GOLD,font=(FONT,8,"bold")).pack(anchor="w",padx=28,pady=(24,8))
+        tk.Label(w,text=story_title,bg="#100e18",fg=TEXT,font=(FONT,18,"bold")).pack(anchor="w",padx=28)
         speaker=tk.Label(w,text="",bg="#100e18",fg=PURPLE,font=(FONT,9,"bold"));speaker.pack(anchor="w",padx=28,pady=(20,6))
         body=tk.Label(w,text="",bg="#100e18",fg="#d8d1e8",font=(FONT,11),wraplength=590,justify="left",anchor="nw")
         body.pack(fill="both",expand=True,padx=28,pady=(0,12))
