@@ -59,6 +59,8 @@ class CampaignDataTests(unittest.TestCase):
             self.assertEqual(profile["campaign_schema"], 3)
             self.assertIn("review_queue", profile)
             self.assertIn("boss_exam_results", profile)
+            self.assertIn("calendar_settings", profile)
+            self.assertIn("calendar_completed_on", profile)
             self.assertEqual(save["profiles"][key]["mission_data"][0]["id"], profile["mission_data"][0]["id"])
 
     def test_caixa_curriculum_uses_non_it_track(self):

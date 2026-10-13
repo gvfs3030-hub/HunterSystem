@@ -640,7 +640,7 @@ def build_campaign_missions(profile_key: str, custom_topics=None):
                 "xp": 30 + min(ci, 10) * 2,
                 "coins": 10 + (ci % 4) * 2,
                 "weight": (15 if chapter_title == "Conhecimentos Bancários" else 10 if chapter_title == "Atendimento Bancário" else 5) if source == "caixa" else 0,
-                "block": "Conhecimentos Básicos" if source == "caixa" and ci < 5 else "Conhecimentos Específicos" if source == "caixa" else "",
+                "block": ("Redação" if "Redação" in chapter_title else "Conhecimentos Básicos" if ci < 5 else "Conhecimentos Específicos") if source == "caixa" else "",
                 "kind": "lesson",
             })
         chapter_last_ids.append(missions[-1]["id"])

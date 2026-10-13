@@ -1,5 +1,6 @@
 """Dados iniciais do Hunter System. Tudo pode ser adaptado no slot personalizado."""
 from copy import deepcopy
+from datetime import date
 from campaign_data import build_campaign_missions, chapter_boss_thresholds
 
 PYTHON_PHASES = [
@@ -200,7 +201,10 @@ def default_profile(key):
         "level":1,"xp":0,"gold":120 if key != "custom" else 80,"completed_missions":[],"bosses_defeated":[],"mission_data":missions,"boss_data":bosses,
         "attributes":{"strength":1,"focus":1,"endurance":1},"attribute_points":0,"inventory":["weapon_training"],"equipped":{"weapon":"weapon_training","armor":None,"charm":None},"potions":2,
         "last_study_date":"","streak":0,"history":[],"quiz_answered":[],"event_claims":{},"story_seen":[],"story_chapters_seen":[],"lesson_notes":{},"quiz_stats":{},
-        "review_queue":[],"boss_exam_results":{},"notes":"","custom_quiz_text":""
+        "review_queue":[],"boss_exam_results":{},"notes":"","custom_quiz_text":"",
+        "diagnostic_results":{},"quiz_attempt_log":[],"simulados":[],"essay_practice_log":[],
+        "calendar_settings":{"start_date":date.today().isoformat(),"daily_minimum":{"python":1,"caixa":2,"custom":1}.get(key,1),"daily_minutes":{"python":60,"caixa":120,"custom":45}.get(key,60),"exam_date":"","target_score":0.85,"version":2},
+        "calendar_completed_on":{}
     }
 
 

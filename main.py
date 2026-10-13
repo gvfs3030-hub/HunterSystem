@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json, os, random, sys, textwrap, zipfile, shutil, webbrowser
+import calendar as pycalendar
 from datetime import date, timedelta, datetime
 from pathlib import Path
 import tkinter as tk
@@ -11,6 +12,8 @@ from game_data import (
     CAIXA_QUIZ, SHOP_ITEMS, STORY, BOSS_NAMES,
 )
 from campaign_data import build_campaign_missions, chapter_boss_thresholds
+from schedule_system import ensure_calendar, day_summary, estimated_minutes, priority_label, reviews_for_date
+from adaptive_planner import (subject_metrics, block_readiness, estimate_readiness, exam_pace, next_spacing_date, build_adaptive_question_set, build_caixa_weighted_mock, OBJECTIVE_QUESTIONS, mission_subject)
 
 APP_NAME = "HUNTER SYSTEM — CRÔNICAS DA FORJA"
 BG = "#0b0b12"
@@ -96,6 +99,8 @@ class HunterSystem(tk.Tk):
         if self.active_key not in self.data["profiles"]:
             self.active_key = "python"
         self.page = "Santuário"
+        self.calendar_selected = date.today()
+        self.calendar_month = date.today().replace(day=1)
         self.page_frames = {}
         self.timer_seconds = 25 * 60
         self.timer_running = False
@@ -124,7 +129,7 @@ class HunterSystem(tk.Tk):
 
     def _apply_window_icon(self):
         try:
-            icon = self._asset_path("hunter_sigil.ico")
+            icon = self._asset_path("hunter_crest.ico")
             if icon.exists():
                 self.iconbitmap(str(icon))
         except Exception:
@@ -283,6 +288,8 @@ class HunterSystem(tk.Tk):
         self.content_host.grid_columnconfigure(0, weight=1)
         if self.page == "Santuário": self.page_dashboard()
         elif self.page in ("Campanha", "Missões"): self.page_campaign()
+        elif self.page == "Calendário": self.page_calendar()
+        elif self.page == "Estratégia": self.page_strategy()
         elif self.page == "Revisões": self.page_reviews()
         elif self.page == "Chefes": self.page_bosses()
         elif self.page == "Arsenal": self.page_armory()
@@ -297,7 +304,7 @@ class HunterSystem(tk.Tk):
         logo.pack(fill="x", padx=18, pady=(22, 22))
         try:
             # Brand artwork: eclipsed portal, open grimoire and golden relic.
-            self.sidebar_logo_image = tk.PhotoImage(file=str(self._asset_path("hunter_sigil_small.png")))
+            self.sidebar_logo_image = tk.PhotoImage(file=str(self._asset_path("hunter_crest_small.png")))
             tk.Label(logo, image=self.sidebar_logo_image, bg=SIDEBAR, bd=0).pack(side="left", padx=(0, 10))
         except Exception:
             emblem = tk.Canvas(logo, width=48, height=48, bg=SIDEBAR, highlightthickness=0)
@@ -340,7 +347,7 @@ class HunterSystem(tk.Tk):
                 widget.bind("<Button-1>", lambda e, k=key: self.switch_profile(k))
         tk.Frame(self.sidebar, bg=BORDER, height=1).pack(fill="x", padx=18, pady=(18, 13))
         tk.Label(self.sidebar, text="REFÚGIO", bg=SIDEBAR, fg=MUTED, font=(FONT, 8, "bold"), anchor="w").pack(fill="x", padx=18, pady=(0, 8))
-        nav = [("Santuário", "⌂"), ("Campanha", "✦"), ("Revisões", "↻"), ("Chefes", "⚔"), ("Arsenal", "◇"), ("Eventos", "◷"), ("Códice", "▤"), ("Configuração", "⚙")]
+        nav = [("Santuário", "⌂"), ("Campanha", "✦"), ("Calendário", "▦"), ("Estratégia", "◈"), ("Revisões", "↻"), ("Chefes", "⚔"), ("Arsenal", "◇"), ("Eventos", "◷"), ("Códice", "▤"), ("Configuração", "⚙")]
         for label, glyph in nav:
             selected = self.page == label
             b = tk.Frame(self.sidebar, bg="#27223d" if selected else SIDEBAR, cursor="hand2")
@@ -502,7 +509,7 @@ class HunterSystem(tk.Tk):
         setting_kicker = {"python":"A CIDADE SEM AURORA  /  CAPÍTULO I", "caixa":"O ARQUIVO DOS ECOS  /  CAPÍTULO I", "custom":"O MAPA EM BRANCO  /  CAPÍTULO I"}.get(self.active_key, "CRÔNICAS DA FORJA")
         tk.Label(left, text=setting_kicker, bg="#20172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
         tk.Label(left, text=p["settings"]["hero"], bg="#20172f", fg=TEXT, font=(FONT, 22, "bold")).pack(anchor="w", pady=(5, 3))
-        tk.Label(left, text=p["settings"]["intro"], bg="#20172f", fg="#d5cde8", font=(FONT, 10), wraplength=700, justify="left").pack(anchor="w", pady=(0, 9 if self.active_key == "caixa" else 15))
+        tk.Label(left, text=p["settings"]["intro"], bg="#20172f", fg="#d5cde8", font=(FONT, 10), wraplength=510, justify="left").pack(anchor="w", pady=(0, 9 if self.active_key == "caixa" else 15))
         if self.active_key == "caixa":
             tk.Label(left, text="ESTRUTURA DO EDITAL ENVIADO  ·  25 BÁSICAS  /  35 ESPECÍFICAS  /  REDAÇÃO ELIMINATÓRIA", bg="#20172f", fg=GOLD, font=(FONT, 7, "bold"), wraplength=720, justify="left").pack(anchor="w", pady=(0, 9))
         line = tk.Frame(left, bg="#20172f")
@@ -515,14 +522,18 @@ class HunterSystem(tk.Tk):
         actions.pack(anchor="w", pady=(14, 0))
         self._button(actions, "RETOMAR A JORNADA  →", lambda:self.navigate("Campanha"), "primary").pack(side="left", padx=(0, 8))
         self._button(actions, "OUVIR A HISTÓRIA", lambda:self.show_story("intro", replay=True), "secondary").pack(side="left")
-        sigil = tk.Canvas(hero, width=172, height=170, bg="#20172f", highlightthickness=0)
-        sigil.grid(row=0, column=1, padx=22, pady=12)
-        sigil.create_oval(24, 18, 148, 142, outline="#593e80", width=2)
-        sigil.create_oval(36, 30, 136, 130, outline=GOLD, width=1)
-        sigil.create_polygon(86, 30, 113, 68, 101, 115, 86, 130, 71, 115, 59, 68, fill=PURPLE_DARK, outline=GOLD, width=2)
-        sigil.create_line(86, 42, 86, 119, fill=GOLD, width=3)
-        sigil.create_line(69, 78, 103, 78, fill=GOLD, width=3)
-        sigil.create_text(86, 153, text="CONSTÂNCIA", fill=GOLD, font=(FONT, 8, "bold"))
+        self._button(actions, "ABRIR CALENDÁRIO  ▦", lambda:self.navigate("Calendário"), "gold").pack(side="left", padx=(8, 0))
+        art = tk.Frame(hero, bg="#20172f", highlightbackground="#65458b", highlightthickness=1)
+        art.grid(row=0, column=1, padx=20, pady=14, sticky="e")
+        try:
+            # A compact panorama gives the sanctuary a real game-world instead of a placeholder emblem.
+            self.dashboard_scene_image = tk.PhotoImage(file=str(self._asset_path("citadel_panorama.png"))).subsample(3, 3)
+            tk.Label(art, image=self.dashboard_scene_image, bg="#20172f", bd=0).pack()
+        except Exception:
+            tk.Label(art, text="◈  CIDADE SEM AURORA  ◈", bg="#20172f", fg=GOLD,
+                     font=(FONT, 10, "bold"), width=28, height=7).pack()
+        tk.Label(art, text="A FORJA ESTÁ ACESA  ·  UM DIA DE CADA VEZ", bg="#20172f", fg=GOLD,
+                 font=(FONT, 7, "bold")).pack(fill="x", pady=(5, 7))
 
         grid = tk.Frame(root, bg=BG)
         grid.pack(fill="x")
@@ -723,6 +734,732 @@ class HunterSystem(tk.Tk):
             if self.page == "Santuário":
                 self.render()
 
+    def _pt_date(self, value):
+        weekdays = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+        months = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+        return f"{weekdays[value.weekday()]}, {value.day:02d} de {months[value.month-1]} de {value.year}"
+
+    def _calendar_is_boss_blocked(self):
+        current = self.next_lesson()
+        boss = self.pending_guardian()
+        return bool(current and boss and current.get("global_index", 0) > boss.get("threshold", 0)), boss
+
+    # ---------------------- ADAPTIVE STUDY STRATEGY ----------------------
+    def page_strategy(self):
+        """Evidence-based planner: diagnose gaps, allocate time and track exam readiness."""
+        root = self.build_scroll_page()
+        p = self.profile
+        cfg = ensure_calendar(p, self.active_key)
+        today = date.today()
+        metrics = subject_metrics(p, self.active_key, today)
+        readiness = estimate_readiness(metrics, self.active_key)
+        pace = exam_pace(p, self.active_key, today)
+        known_text = "Calibração pendente" if readiness["weighted_accuracy"] is None else f"{readiness['weighted_accuracy'] * 100:.1f}% nos assuntos avaliados"
+
+        hero = tk.Frame(root, bg="#21172f", highlightbackground="#67468f", highlightthickness=1)
+        hero.pack(fill="x", pady=(0, 12))
+        left = tk.Frame(hero, bg="#21172f")
+        left.pack(side="left", fill="both", expand=True, padx=18, pady=18)
+        tk.Label(left, text="LABORATÓRIO DE DESEMPENHO  /  TREINADOR ADAPTATIVO", bg="#21172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
+        tk.Label(left, text="Transforme erros em plano de ação", bg="#21172f", fg=TEXT, font=(FONT, 19, "bold")).pack(anchor="w", pady=(5, 5))
+        description = ("O plano combina peso na prova, resultados de diagnóstico, últimos testes, tempo sem revisar e revisões vencidas. "
+                       "A sequência da campanha permanece linear; o algoritmo ajusta reforços e tempo, não finge que conteúdos foram aprendidos.")
+        tk.Label(left, text=description, bg="#21172f", fg="#d8cfe7", font=(FONT, 9), wraplength=790, justify="left").pack(anchor="w")
+        try:
+            asset = "iria_portrait.png" if self.active_key == "caixa" else "hunter_portrait.png"
+            self.strategy_portrait = tk.PhotoImage(file=str(self._asset_path(asset))).subsample(4, 4)
+            tk.Label(hero, image=self.strategy_portrait, bg="#21172f", bd=0).pack(side="right", padx=14, pady=10)
+        except Exception:
+            pass
+
+        stats = tk.Frame(root, bg=BG)
+        stats.pack(fill="x", pady=(0, 12))
+        [stats.grid_columnconfigure(i, weight=1, uniform="stats") for i in range(3)]
+        cards = [
+            ("ESTIMATIVA ATUAL", known_text, PURPLE),
+            ("ASSUNTOS CALIBRADOS", f"{readiness['known_subjects']}/{readiness['total_subjects']}", GOLD),
+            ("REVISÕES VENCIDAS", str(len(self.due_reviews())), RED if self.due_reviews() else MINT),
+        ]
+        for idx, (title, value, color) in enumerate(cards):
+            card = tk.Frame(stats, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+            card.grid(row=0, column=idx, sticky="ew", padx=(0 if idx == 0 else 5, 0 if idx == 2 else 5))
+            tk.Label(card, text=title, bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).pack(anchor="w", padx=12, pady=(10, 3))
+            tk.Label(card, text=value, bg=PANEL, fg=color, font=(FONT, 13, "bold"), wraplength=260, justify="left").pack(anchor="w", padx=12, pady=(0, 11))
+
+        # Caixa is not just a weighted-average race: both objective blocks have their own
+        # eliminatory threshold. Present weighted estimates and clearly expose sample coverage.
+        if self.active_key == "caixa":
+            block_card = self._card(root, "Barreira contra eliminação", "PROJEÇÃO PONDERADA · EDITAL ANEXADO")
+            block_card.pack(fill="x", pady=(0, 12))
+            block_body = tk.Frame(block_card, bg=PANEL)
+            block_body.pack(fill="x", padx=14, pady=(0, 13))
+            for block_info in block_readiness(metrics, self.active_key, float(cfg.get("target_score", .85))):
+                color = RED if block_info["accuracy"] is not None and block_info["accuracy"] < .50 else GOLD if block_info["accuracy"] is None or block_info["accuracy"] < .65 else MINT
+                row = tk.Frame(block_body, bg=PANEL_2, highlightbackground=color, highlightthickness=1)
+                row.pack(fill="x", pady=(0, 6))
+                tk.Label(row, text=block_info["block"].upper(), bg=PANEL_2, fg=TEXT, font=(FONT, 9, "bold")).pack(anchor="w", padx=11, pady=(8, 2))
+                if block_info["accuracy"] is None:
+                    detail = f"Sem evidência ainda · calibre {block_info['total_subjects']} disciplinas para estimar este bloco."
+                else:
+                    coverage = f"{block_info['known_subjects']}/{block_info['total_subjects']} disciplinas calibradas"
+                    percent = block_info["accuracy"] * 100
+                    points = f" · projeção {block_info['estimated_points']:.1f}/{block_info['max_points']} pontos" if block_info["complete_coverage"] else " · estimativa parcial, não nota prevista"
+                    detail = f"{percent:.1f}% ponderados nos assuntos medidos · {coverage}{points} · {block_info['status']}"
+                tk.Label(row, text=detail, bg=PANEL_2, fg=color, font=(FONT, 8, "bold"), wraplength=900, justify="left").pack(anchor="w", padx=11, pady=(0, 8))
+            tk.Label(block_body, text="O edital anexado prevê eliminação abaixo de 50% do total e abaixo de 50% em Conhecimentos Básicos ou Específicos. A meta interna busca margem acima desse corte; a estimativa só se torna representativa quando você calibra todas as disciplinas e faz simulados. Não é previsão de resultado oficial.", bg=PANEL, fg=MUTED, font=(FONT, 8), wraplength=920, justify="left").pack(anchor="w", pady=(0, 3))
+
+        settings = self._card(root, "Parâmetros do treinador", "AJUSTE AO TEMPO REAL DISPONÍVEL")
+        settings.pack(fill="x", pady=(0, 12))
+        body = tk.Frame(settings, bg=PANEL)
+        body.pack(fill="x", padx=15, pady=(0, 14))
+        exam_row = tk.Frame(body, bg=PANEL)
+        exam_row.pack(fill="x", pady=(0, 7))
+        tk.Label(exam_row, text="Data-alvo da prova (AAAA-MM-DD; deixe vazio se ainda não há data)", bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).pack(side="left", padx=(0, 8))
+        exam_var = tk.StringVar(value=str(cfg.get("exam_date", "")))
+        tk.Entry(exam_row, textvariable=exam_var, bg=PANEL_2, fg=TEXT, insertbackground=TEXT, relief="flat", width=15, font=(FONT, 9)).pack(side="left", ipady=5)
+        fields = tk.Frame(body, bg=PANEL)
+        fields.pack(fill="x", pady=(3, 8))
+        tk.Label(fields, text="Tempo diário (min)", bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).pack(side="left", padx=(0, 7))
+        minutes_var = tk.StringVar(value=str(cfg.get("daily_minutes", {"python": 60, "caixa": 120, "custom": 45}.get(self.active_key, 60))))
+        tk.Spinbox(fields, from_=20, to=480, increment=10, textvariable=minutes_var, width=5, bg=PANEL_2, fg=TEXT, buttonbackground=PANEL_2, insertbackground=TEXT, relief="flat").pack(side="left", padx=(0, 16), ipady=4)
+        tk.Label(fields, text="Mínimo diário de tópicos", bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).pack(side="left", padx=(0, 7))
+        minimum_var = tk.StringVar(value=str(cfg.get("daily_minimum", 2 if self.active_key == "caixa" else 1)))
+        tk.Spinbox(fields, from_=1, to=5, textvariable=minimum_var, width=4, bg=PANEL_2, fg=TEXT, buttonbackground=PANEL_2, insertbackground=TEXT, relief="flat").pack(side="left", padx=(0, 16), ipady=4)
+        tk.Label(fields, text="Meta de acerto (%)", bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).pack(side="left", padx=(0, 7))
+        target_var = tk.StringVar(value=str(round(float(cfg.get("target_score", .85)) * 100)))
+        tk.Spinbox(fields, from_=50, to=100, increment=5, textvariable=target_var, width=4, bg=PANEL_2, fg=TEXT, buttonbackground=PANEL_2, insertbackground=TEXT, relief="flat").pack(side="left", padx=(0, 12), ipady=4)
+
+        def apply_trainer_settings():
+            try:
+                exam_text = exam_var.get().strip()
+                if exam_text:
+                    exam = date.fromisoformat(exam_text)
+                    if exam < today:
+                        if not messagebox.askyesno("Data passada", "A data informada já passou. Salvar mesmo assim para registrar o prazo antigo?", parent=self):
+                            return
+                minutes = int(minutes_var.get())
+                minimum = int(minimum_var.get())
+                target_score = int(target_var.get())
+                if not 20 <= minutes <= 480:
+                    raise ValueError("O tempo diário deve ficar entre 20 e 480 minutos.")
+                if not 1 <= minimum <= 5:
+                    raise ValueError("O mínimo deve ficar entre 1 e 5 tópicos.")
+                if not 50 <= target_score <= 100:
+                    raise ValueError("A meta de acerto precisa ficar entre 50% e 100%.")
+                cfg["exam_date"] = exam_text
+                cfg["daily_minutes"] = minutes
+                cfg["daily_minimum"] = minimum
+                cfg["target_score"] = target_score / 100
+                cfg["version"] = 2
+                self.save()
+                self.status_var.set("Parâmetros salvos. A projeção e a prioridade dos reforços foram recalculadas.")
+                self.render()
+            except Exception as exc:
+                messagebox.showerror("Configuração inválida", f"Confira data, minutos, mínimo e meta de acerto.\n\n{exc}", parent=self)
+        self._button(fields, "SALVAR PLANO", apply_trainer_settings, "primary").pack(side="right")
+        tk.Label(body, text="O calendário não transforma horas irreais em promessa. Se a data-alvo exigir mais trabalho do que cabe no seu tempo, a tela sinaliza o risco para você ajustar a meta ou a data.", bg=PANEL, fg=MUTED, font=(FONT, 8), wraplength=920, justify="left").pack(anchor="w", pady=(2, 0))
+
+        # Concrete plan for this session: due reviews first, the linear campaign next, then a
+        # targeted booster based on observed weakness and exam weighting.
+        blocked_today, boss_today = self._calendar_is_boss_blocked()
+        today_plan = day_summary(p, self.active_key, today, today, blocked_today)
+        scheduled_minutes = today_plan["estimated_minutes"]
+        overdue_reviews = self.due_reviews()
+        review_minutes = len(overdue_reviews) * 8
+        daily_budget = int(cfg.get("daily_minutes", 60))
+        plan_card = self._card(root, "Plano recomendado para hoje", "MÍNIMO VIÁVEL + MAIOR RETORNO ESPERADO")
+        plan_card.pack(fill="x", pady=(12, 12))
+        plan_body = tk.Frame(plan_card, bg=PANEL)
+        plan_body.pack(fill="x", padx=15, pady=(0, 14))
+        if overdue_reviews:
+            tk.Label(plan_body, text=f"1. MEMÓRIA PRIMEIRO  ·  {len(overdue_reviews)} revisão(ões) pendente(s), cerca de {review_minutes} min. Faça-as sem consulta; falhas viram sinal para reforçar o assunto.", bg=PANEL_2, fg=GOLD, font=(FONT, 9, "bold"), wraplength=900, justify="left", padx=11, pady=9).pack(fill="x", pady=(0, 7))
+        else:
+            tk.Label(plan_body, text="1. MEMÓRIA EM DIA  ·  não há revisões vencidas; novas revisões serão marcadas em D+1, D+7 e D+30.", bg=PANEL_2, fg=MINT, font=(FONT, 9, "bold"), wraplength=900, justify="left", padx=11, pady=9).pack(fill="x", pady=(0, 7))
+        next_item = self.next_lesson()
+        if blocked_today and boss_today:
+            campaign_line = f"2. PORTAL SELADO  ·  antes de uma nova lição, a tarefa principal é preparar e vencer {boss_today['name']}."
+        elif next_item:
+            campaign_line = f"2. CAMPANHA LINEAR  ·  {next_item['title']} ({estimated_minutes(next_item, self.active_key)} min estimados). A sequência não é pulada; bônus não marcam tópicos automaticamente."
+        else:
+            campaign_line = "2. CAMPANHA CONCLUÍDA  ·  use os simulados e as revisões para consolidar antes do último guardião."
+        tk.Label(plan_body, text=campaign_line, bg="#211b2f", fg=TEXT, font=(FONT, 9, "bold"), wraplength=900, justify="left", padx=11, pady=9).pack(fill="x", pady=(0, 7))
+        estimated_core = scheduled_minutes + review_minutes
+        minutes_for_focus = max(0, daily_budget - estimated_core)
+        if metrics:
+            focus = metrics[0]
+            focus_minutes = min(safe_int(focus.get("recommended_minutes", 0)), minutes_for_focus)
+            if focus_minutes > 0:
+                focus_line = f"3. REFORÇO ESTRATÉGICO  ·  {focus['subject']} — {focus['status'].lower()}. Reserve {focus_minutes} min dentro do tempo restante de {daily_budget} min/dia. {focus['recommendation']}"
+            else:
+                focus_line = f"3. REFORÇO ESTRATÉGICO  ·  {focus['subject']} é a maior prioridade, mas o mínimo e as revisões já ocupam o orçamento de {daily_budget} min. Não empilhe carga: faça primeiro o essencial e retome o reforço na próxima sessão."
+            tk.Label(plan_body, text=focus_line, bg="#1d2928", fg=MINT if focus_minutes else GOLD, font=(FONT, 9), wraplength=900, justify="left", padx=11, pady=9).pack(fill="x", pady=(0, 7))
+            focus_actions = tk.Frame(plan_body, bg=PANEL)
+            focus_actions.pack(fill="x", pady=(1, 0))
+            if focus.get("is_essay") and self.active_key == "caixa":
+                self._button(focus_actions, "COMEÇAR TREINO DE REDAÇÃO", self.start_essay_practice, "gold").pack(side="left")
+            else:
+                self._button(focus_actions, f"TESTAR / REFORÇAR: {focus['subject']}", lambda subject=focus["subject"]:self.start_subject_diagnostic(subject), "mint").pack(side="left")
+            tk.Label(focus_actions, text="O reforço é independente da próxima lição. A ordem da campanha não é quebrada e nenhuma etapa é marcada como concluída por estimativa.", bg=PANEL, fg=MUTED, font=(FONT, 8), wraplength=520, justify="left").pack(side="left", padx=10)
+        if estimated_core > daily_budget:
+            over = estimated_core - daily_budget
+            tk.Label(plan_body, text=f"ALERTA DE CARGA  ·  mínimo + revisões estimam {estimated_core} min, {over} min acima do seu orçamento. Faça a revisão e o tópico principal em blocos realistas, ou ajuste o plano; não tente compensar sacrificando o sono.", bg="#3b202a", fg="#ffc1cb", font=(FONT, 8, "bold"), wraplength=900, justify="left", padx=11, pady=9).pack(fill="x", pady=(7, 0))
+
+        if self.active_key == "caixa":
+            essay_logs = [x for x in p.get("essay_practice_log", []) if isinstance(x, dict) and x.get("date")]
+            last_essay_day = None
+            if essay_logs:
+                try: last_essay_day = date.fromisoformat(str(essay_logs[-1].get("date")))
+                except ValueError: pass
+            essay_due = last_essay_day is None or (today - last_essay_day).days >= 7
+            sim_logs = p.get("simulados", []) if isinstance(p.get("simulados", []), list) else []
+            last_sim_day = None
+            if sim_logs:
+                try: last_sim_day = date.fromisoformat(str(sim_logs[-1].get("date")))
+                except ValueError: pass
+            sim_due = last_sim_day is None or (today - last_sim_day).days >= 7
+            routine = self._card(root, "Ritual semanal de prova", "REDAÇÃO + RECUPERAÇÃO CUMULATIVA")
+            routine.pack(fill="x", pady=(0, 12))
+            routine_body = tk.Frame(routine, bg=PANEL)
+            routine_body.pack(fill="x", padx=15, pady=(0, 13))
+            essay_text = "Treino de redação recomendado nesta semana" if essay_due else f"Redação registrada em {last_essay_day.strftime('%d/%m/%Y')}"
+            sim_text = "Simulado adaptativo recomendado nesta semana" if sim_due else f"Último simulado registrado em {last_sim_day.strftime('%d/%m/%Y')}"
+            tk.Label(routine_body, text=f"✍  {essay_text}  ·  {('pendente' if essay_due else 'registrado')}", bg=PANEL_2, fg=GOLD if essay_due else MINT, font=(FONT, 9, "bold"), padx=10, pady=8, anchor="w").pack(fill="x", pady=(0, 5))
+            tk.Label(routine_body, text=f"⚔  {sim_text}  ·  {('pendente' if sim_due else 'registrado')}", bg=PANEL_2, fg=GOLD if sim_due else MINT, font=(FONT, 9, "bold"), padx=10, pady=8, anchor="w").pack(fill="x", pady=(0, 8))
+            routine_actions = tk.Frame(routine_body, bg=PANEL); routine_actions.pack(fill="x")
+            self._button(routine_actions, "ESCREVER REDAÇÃO", self.start_essay_practice, "gold").pack(side="left", padx=(0, 8))
+            self._button(routine_actions, "SIMULADO 60 QUESTÕES", self.start_caixa_weighted_mock, "primary").pack(side="left")
+
+        self._section(root, "Diagnóstico do desempenho", "RESULTADOS REAIS, NÃO PALPITES")
+        tk.Label(root, text="Faça um diagnóstico curto por assunto. O resultado muda a fila de prioridades. Testes de lições e simulados também alimentam o cálculo; assuntos sem evidência ficam marcados como não calibrados.", bg=BG, fg=MUTED, font=(FONT, 9), wraplength=950, justify="left").pack(anchor="w", pady=(0, 8))
+        if self.active_key == "caixa":
+            tk.Label(root, text="Estratégia da Caixa: o peso objetivo do edital define a importância inicial (15 questões em Conhecimentos Bancários, 10 em Atendimento e 5 nos demais eixos); erros e resultados baixos aumentam a prioridade. Básicos e específicos são acompanhados separadamente por causa dos cortes mínimos do edital 2024 anexado. Redação é eliminatória e recebe treino recorrente.", bg="#211b2f", fg="#e5dcef", font=(FONT, 9), wraplength=920, justify="left", padx=13, pady=11).pack(fill="x", pady=(0, 10))
+        metric_host = tk.Frame(root, bg=BG)
+        metric_host.pack(fill="x")
+        for metric in metrics:
+            card = tk.Frame(metric_host, bg=PANEL, highlightbackground=(RED if metric.get("status") == "Ponto crítico" else BORDER), highlightthickness=1)
+            card.pack(fill="x", pady=(0, 7))
+            main_line = tk.Frame(card, bg=PANEL)
+            main_line.pack(fill="x", padx=13, pady=(10, 3))
+            left_info = tk.Frame(main_line, bg=PANEL)
+            left_info.pack(side="left", fill="x", expand=True)
+            tk.Label(left_info, text=f"#{metric['rank']:02d}  ·  {metric['subject']}", bg=PANEL, fg=TEXT, font=(FONT, 10, "bold"), wraplength=650, justify="left").pack(anchor="w")
+            if metric.get("known"):
+                if metric.get("is_essay"):
+                    accuracy_text = f"{metric['accuracy'] * 100:.0f}% dos critérios autoavaliados"
+                else:
+                    accuracy_text = f"{metric['accuracy'] * 100:.0f}% de acerto observado"
+                accuracy_color = MINT if metric["accuracy"] >= float(cfg.get("target_score", .85)) else GOLD if metric["accuracy"] >= .70 else RED
+            else:
+                accuracy_text = "Sem diagnóstico ainda"
+                accuracy_color = MUTED
+            tk.Label(left_info, text=f"{metric['status']}  ·  {accuracy_text}  ·  {metric['recommended_minutes']} min recomendados", bg=PANEL, fg=accuracy_color, font=(FONT, 8, "bold")).pack(anchor="w", pady=(3, 0))
+            if self.active_key == "caixa" and metric.get("weight"):
+                weight_text = f"Peso do edital: {metric['weight']} questão(ões)"
+            elif metric.get("is_essay"):
+                weight_text = "Treino recorrente · etapa eliminatória"
+            else:
+                weight_text = f"{metric['lesson_count']} etapas nesta região"
+            tk.Label(main_line, text=weight_text, bg=PANEL, fg=GOLD, font=(FONT, 8, "bold"), anchor="e", justify="right", wraplength=185).pack(side="right", padx=(10, 0))
+            if metric.get("known"):
+                self._progress(card, metric["accuracy"], 1.0, MINT if metric["accuracy"] >= .80 else GOLD if metric["accuracy"] >= .60 else RED, height=5)
+            tk.Label(card, text=metric["recommendation"], bg=PANEL, fg=MUTED, font=(FONT, 8), wraplength=850, justify="left").pack(anchor="w", padx=13, pady=(5, 3))
+            controls = tk.Frame(card, bg=PANEL)
+            controls.pack(fill="x", padx=13, pady=(0, 9))
+            if metric.get("known"):
+                last = "" if metric.get("days_stale") is None else f" · evidência há {metric['days_stale']} dia(s)"
+                tk.Label(controls, text=f"Índice de prioridade: {metric['priority_score']:.2f}{last}", bg=PANEL, fg="#8d87a6", font=(FONT, 7)).pack(side="left")
+            else:
+                tk.Label(controls, text="O algoritmo evita inventar uma nota: calibre este assunto.", bg=PANEL, fg="#8d87a6", font=(FONT, 7)).pack(side="left")
+            if not metric.get("is_essay"):
+                self._button(controls, "FAZER DIAGNÓSTICO · 5 QUESTÕES", lambda subject=metric["subject"]:self.start_subject_diagnostic(subject), "secondary").pack(side="right")
+            elif self.active_key == "caixa":
+                self._button(controls, "TREINO DE REDAÇÃO", self.start_essay_practice, "gold").pack(side="right")
+
+        self._section(root, "Provas de recuperação", "MEDIR, AJUSTAR, REPETIR")
+        actions = tk.Frame(root, bg=BG)
+        actions.pack(fill="x", pady=(0, 10))
+        sim_title = "SIMULADO ADAPTATIVO · 20 QUESTÕES" if self.active_key == "caixa" else "TESTE CUMULATIVO · 20 QUESTÕES"
+        self._button(actions, sim_title, self.start_adaptive_simulation, "gold").pack(side="left", padx=(0, 8))
+        if self.active_key == "caixa":
+            self._button(actions, "SIMULADO 60 QUESTÕES · PESO DO EDITAL", self.start_caixa_weighted_mock, "primary").pack(side="left", padx=(0, 8))
+        self._button(actions, "ABRIR CÂMARA DA MEMÓRIA", lambda:self.navigate("Revisões"), "secondary").pack(side="left", padx=(0, 8))
+        sims = p.get("simulados", []) if isinstance(p.get("simulados", []), list) else []
+        if sims:
+            last = sims[-1]
+            acc = safe_int(last.get("score", 0)) / max(1, safe_int(last.get("total", 1)))
+            sim_card = self._card(root, "Último simulado adaptativo", f"{last.get('date', '')}")
+            sim_card.pack(fill="x", pady=(0, 12))
+            tk.Label(sim_card, text=f"{last.get('score', 0)}/{last.get('total', 0)} corretas · {acc*100:.0f}% · {'atingiu' if acc >= float(cfg.get('target_score', .85)) else 'ainda não atingiu'} a meta pessoal de {float(cfg.get('target_score', .85))*100:.0f}%", bg=PANEL, fg=MINT if acc >= float(cfg.get('target_score', .85)) else GOLD, font=(FONT, 10, "bold")).pack(anchor="w", padx=15, pady=(0, 7))
+            by_block = last.get("by_block", {})
+            if by_block:
+                block_summary = "  ·  ".join(f"{name}: {v.get('score',0)}/{v.get('total',0)}" for name, v in by_block.items())
+                tk.Label(sim_card, text=block_summary, bg=PANEL, fg=GOLD, font=(FONT, 8, "bold"), wraplength=900, justify="left").pack(anchor="w", padx=15, pady=(0, 5))
+            by_subject = last.get("by_subject", {})
+            if by_subject:
+                summary = "  ·  ".join(f"{name}: {v.get('score',0)}/{v.get('total',0)}" for name, v in sorted(by_subject.items()))
+                tk.Label(sim_card, text=summary, bg=PANEL, fg=MUTED, font=(FONT, 8), wraplength=900, justify="left").pack(anchor="w", padx=15, pady=(0, 13))
+        else:
+            tk.Label(root, text="Ainda não há simulados registrados. Faça o primeiro para que a estratégia compare seu desempenho por assunto ao longo do tempo.", bg=BG, fg=MUTED, font=(FONT, 9), wraplength=920, justify="left").pack(anchor="w", pady=(0, 10))
+
+        if pace:
+            self._section(root, "Ritmo até a data-alvo", "PROJEÇÃO, NÃO GARANTIA")
+            pace_card = self._card(root, pace["status"], f"{pace['days_left']} dia(s) restantes")
+            pace_card.pack(fill="x", pady=(0, 12))
+            pace_text = (f"Faltam {pace['pending_lessons']} etapas da trilha. Para terminar antes da data escolhida, o ritmo matemático é de cerca de "
+                         f"{pace['required_daily_lessons']} tópico(s)/dia e {pace['time_required_per_day']} min/dia estimados; seu plano atual é "
+                         f"{pace['daily_minimum']} tópico(s) e {pace['daily_minutes']} min/dia. Isso estima a trilha restante, não prevê sua nota nem substitui revisão e simulados.")
+            tk.Label(pace_card, text=pace_text, bg=PANEL, fg=TEXT, font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w", padx=15, pady=(0, 13))
+
+    def start_subject_diagnostic(self, subject):
+        p = self.profile
+        pool = []
+        seen = set()
+        for mission in p.get("mission_data", []):
+            if mission_subject(mission) != subject:
+                continue
+            for question in mission.get("quiz", []):
+                key = str(question.get("q", "")).strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                item = dict(question)
+                item["_planner_subject"] = subject
+                pool.append(item)
+        if not pool:
+            messagebox.showinfo("Diagnóstico indisponível", "Ainda não há questões cadastradas para este assunto.")
+            return
+        questions = random.sample(pool, min(5, len(pool)))
+        def store(score, total, _records):
+            p.setdefault("diagnostic_results", {})[subject] = {"score": score, "total": total, "date": date.today().isoformat(), "source": "diagnóstico"}
+            self.save()
+        def done(_score):
+            self.status_var.set(f"Diagnóstico salvo para {subject}. A prioridade de estudo foi recalculada.")
+            self.render()
+        self.run_quiz_dialog(
+            f"Diagnóstico adaptativo · {subject}",
+            "Responda sem consultar. Este teste mede o ponto de partida e não libera nem bloqueia etapas da história.",
+            questions, 0, done, retry_label="REFAZER DIAGNÓSTICO", on_attempt=store, result_mode="diagnostic")
+
+    def _record_lesson_attempt(self, lesson, score, total, records):
+        p = self.profile
+        log = p.setdefault("quiz_attempt_log", [])
+        log.append({"date": date.today().isoformat(), "lesson_id": lesson["id"], "subject": mission_subject(lesson),
+                    "chapter_title": lesson.get("chapter_title", lesson.get("topic", "Geral")), "score": int(score), "total": int(total)})
+        if len(log) > 3000:
+            del log[:-3000]
+        stats = p.setdefault("quiz_stats", {}).setdefault(lesson["id"], {"attempts": 0, "best": 0})
+        stats["last_score"] = int(score)
+        stats["total"] = int(total)
+        stats["last_attempt_date"] = date.today().isoformat()
+        stats["best_attempt_score"] = max(safe_int(stats.get("best_attempt_score", 0)), int(score))
+        self.save(quiet=True)
+
+    def start_adaptive_simulation(self):
+        questions = build_adaptive_question_set(self.profile, self.active_key, count=20, rng=random)
+        if not questions:
+            messagebox.showinfo("Simulado indisponível", "Ainda não há questões suficientes nesta jornada.")
+            return
+        mode_name = "Simulado adaptativo" if self.active_key == "caixa" else "Teste cumulativo adaptativo"
+        def record(score, total, records):
+            p = self.profile
+            by_subject = {}
+            for result in records:
+                subject = result.get("subject", "Geral")
+                part = by_subject.setdefault(subject, {"score": 0, "total": 0})
+                part["total"] += 1
+                if result.get("correct"):
+                    part["score"] += 1
+            simulation = {"date": date.today().isoformat(), "score": int(score), "total": int(total),
+                          "accuracy": round(score / max(1, total), 4), "by_subject": by_subject,
+                          "mode": mode_name, "question_count": total}
+            p.setdefault("simulados", []).append(simulation)
+            p["simulados"] = p["simulados"][-100:]
+            p.setdefault("history", []).append({"date": date.today().isoformat(), "type": "simulado", "title": mode_name, "xp": 0, "gold": 0, "score": score, "total": total})
+            self.save(quiet=True)
+        def finished(score):
+            self.status_var.set(f"{mode_name} registrado: {score}/20. O plano agora considera os resultados por assunto.")
+            self.render()
+        subtitle = "20 questões autorais do aplicativo, distribuídas por peso e reforçadas em áreas fracas. Não é uma prova oficial; o resultado recalibra suas prioridades."
+        self.run_quiz_dialog(mode_name, subtitle, questions, 0, finished,
+                             retry_label="REFAZER SIMULADO", on_attempt=record, result_mode="simulado")
+
+    def start_caixa_weighted_mock(self):
+        if self.active_key != "caixa":
+            messagebox.showinfo("Simulado da Caixa", "O simulado com a distribuição do edital está disponível no slot da Caixa.")
+            return
+        questions = build_caixa_weighted_mock(self.profile, rng=random)
+        if len(questions) != 60:
+            messagebox.showwarning(
+                "Banco de questões insuficiente",
+                f"O simulado conseguiu montar {len(questions)} questões, não 60. Confira se você manteve o banco original do projeto.",
+                parent=self,
+            )
+            return
+        by_expected = {}
+        for question in questions:
+            subject = question.get("_planner_subject", "Geral")
+            by_expected[subject] = by_expected.get(subject, 0) + 1
+        if by_expected != OBJECTIVE_QUESTIONS:
+            messagebox.showwarning(
+                "Distribuição incompleta",
+                "O banco deste perfil não permite compor exatamente a distribuição do edital. Restaure o conteúdo original da campanha da Caixa antes de fazer esse simulado.",
+                parent=self,
+            )
+            return
+        breakdown = " · ".join(f"{subject}: {count}" for subject, count in by_expected.items())
+        mode_name = "Simulado de treino · distribuição TBN 2024"
+
+        def record(score, total, records):
+            p = self.profile
+            by_subject = {}
+            by_block = {
+                "Conhecimentos Básicos": {"score": 0, "total": 0},
+                "Conhecimentos Específicos": {"score": 0, "total": 0},
+            }
+            for result in records:
+                subject = result.get("subject", "Geral")
+                part = by_subject.setdefault(subject, {"score": 0, "total": 0})
+                part["total"] += 1
+                if result.get("correct"):
+                    part["score"] += 1
+                block = result.get("block")
+                if block in by_block:
+                    by_block[block]["total"] += 1
+                    if result.get("correct"):
+                        by_block[block]["score"] += 1
+            simulation = {
+                "date": date.today().isoformat(), "score": int(score), "total": int(total),
+                "accuracy": round(score / max(1, total), 4), "by_subject": by_subject,
+                "by_block": by_block, "mode": mode_name, "question_count": total,
+                "expected_distribution": by_expected, "official_questions": False,
+            }
+            p.setdefault("simulados", []).append(simulation)
+            p["simulados"] = p["simulados"][-100:]
+            p.setdefault("history", []).append({"date": date.today().isoformat(), "type": "simulado", "title": mode_name, "score": int(score), "total": int(total), "xp": 0, "gold": 0})
+            self.save()
+
+        def finish(score):
+            self.status_var.set(f"Simulado de 60 questões concluído: {score}/60. O resultado por matéria e bloco já alimenta a estratégia.")
+            self.render()
+
+        self.run_quiz_dialog(
+            "Simulado de treino · Técnico Bancário Novo",
+            "60 questões com distribuição baseada no edital TBN comum de 2024 enviado. As questões são do banco de estudo do aplicativo, não são itens oficiais da Cesgranrio.\n\n" + breakdown,
+            questions, 0, finish, retry_label="REFAZER SIMULADO", on_attempt=record, result_mode="simulado",
+        )
+
+    def start_essay_practice(self):
+        if self.active_key != "caixa":
+            messagebox.showinfo("Treino da redação", "Esta atividade está configurada para a jornada da Caixa.")
+            return
+        prompts = [
+            "Como conciliar a ampliação dos serviços bancários digitais com a inclusão de pessoas com diferentes níveis de letramento digital?",
+            "A confiança nas instituições financeiras depende apenas da tecnologia? Discuta o papel da transparência e do atendimento. ",
+            "Quais desafios surgem ao proteger dados pessoais sem comprometer a qualidade dos serviços digitais?",
+            "Como o atendimento humanizado pode contribuir para a cidadania financeira?",
+            "Discuta a importância da educação financeira para decisões de consumo e planejamento de longo prazo.",
+            "Como inovação e responsabilidade devem caminhar juntas em serviços oferecidos por instituições financeiras?",
+        ]
+        prompt = prompts[(len(self.profile.get("essay_practice_log", [])) + date.today().toordinal()) % len(prompts)]
+        win = tk.Toplevel(self)
+        win.title("Oficina da Redação · Caixa")
+        win.geometry("900x720")
+        win.minsize(760, 620)
+        win.configure(bg=BG)
+        win.transient(self); win.grab_set()
+        shell = tk.Frame(win, bg=BG); shell.pack(fill="both", expand=True, padx=22, pady=18)
+        tk.Label(shell, text="OFICINA DA REDAÇÃO  /  TREINO AUTORAL", bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
+        tk.Label(shell, text="Escreva antes de consultar", bg=BG, fg=TEXT, font=(FONT, 18, "bold")).pack(anchor="w", pady=(5, 9))
+        tk.Label(shell, text=prompt, bg=PANEL, fg=TEXT, font=(FONT, 10, "bold"), wraplength=820, justify="left", padx=14, pady=13).pack(fill="x", pady=(0, 10))
+        essay = tk.Text(shell, bg=PANEL_2, fg=TEXT, insertbackground=TEXT, relief="flat", wrap="word", font=(FONT, 10), padx=12, pady=10)
+        essay.pack(fill="both", expand=True, pady=(0, 7))
+        tk.Label(shell, text="A autoavaliação não é uma correção automática. Use a rubrica para identificar pontos a melhorar; se possível, peça revisão humana do texto.", bg=BG, fg=MUTED, font=(FONT, 8), wraplength=820, justify="left").pack(anchor="w", pady=(0, 7))
+        rubric = tk.Frame(shell, bg=BG); rubric.pack(fill="x", pady=(0, 8))
+        rubric_vars = []
+        for label in ["Tese clara", "Argumentos desenvolvidos", "Coesão entre parágrafos", "Norma formal e precisão", "Conclusão ligada à tese"]:
+            var = tk.BooleanVar(master=win, value=False); rubric_vars.append(var)
+            tk.Checkbutton(rubric, text=label, variable=var, bg=BG, fg=TEXT, selectcolor=PANEL_2, activebackground=BG, activeforeground=TEXT, font=(FONT, 8)).pack(side="left", padx=(0, 8))
+        def save_essay():
+            text_body = essay.get("1.0", "end").strip()
+            if len(text_body) < 80:
+                if not messagebox.askyesno("Texto curto", "O texto tem menos de 80 caracteres. Salvar mesmo assim como rascunho?", parent=win):
+                    return
+            score = sum(1 for v in rubric_vars if v.get())
+            item = {"date": date.today().isoformat(), "prompt": prompt, "text": text_body,
+                    "rubric_score": score, "rubric": [bool(v.get()) for v in rubric_vars],
+                    "word_count": len(text_body.split()), "status": "autoavaliado" if all(v.get() for v in rubric_vars) else "precisa de revisão"}
+            p = self.profile
+            p.setdefault("essay_practice_log", []).append(item)
+            p["essay_practice_log"] = p["essay_practice_log"][-100:]
+            p.setdefault("history", []).append({"date": date.today().isoformat(), "type": "redação", "title": "Oficina da Redação", "xp": 0, "gold": 0, "score": score, "total": 5})
+            self.save(); win.destroy(); self.render()
+            self.status_var.set(f"Redação salva com {item['word_count']} palavras. Autoavaliação: {score}/5; não é uma nota oficial.")
+            messagebox.showinfo("Redação registrada", f"Texto salvo localmente. Autoavaliação: {score}/5 critérios.\nPalavras: {item['word_count']}\n\nA autoavaliação não substitui correção por uma pessoa qualificada.")
+        footer = tk.Frame(shell, bg=BG); footer.pack(fill="x", pady=(6, 0))
+        self._button(footer, "CANCELAR", win.destroy, "secondary").pack(side="left")
+        self._button(footer, "SALVAR TEXTO E AUTOAVALIAÇÃO", save_essay, "gold").pack(side="right")
+
+    def page_calendar(self):
+        """Interactive month calendar with rolling/adaptive daily study plan."""
+        root = self.build_scroll_page()
+        p = self.profile
+        cfg = ensure_calendar(p, self.active_key)
+        today = date.today()
+        selected = getattr(self, "calendar_selected", today)
+        month = getattr(self, "calendar_month", today.replace(day=1))
+        try:
+            if selected.month != month.month or selected.year != month.year:
+                selected = month
+                self.calendar_selected = selected
+        except Exception:
+            selected = today
+            self.calendar_selected = today
+        blocked, boss = self._calendar_is_boss_blocked()
+        daily_min = int(cfg.get("daily_minimum", 1))
+        summary = day_summary(p, self.active_key, selected, today, blocked)
+        current_metrics = subject_metrics(p, self.active_key, today)
+
+        hero = self._card(root, "Calendário de jornada", "PLANO ADAPTATIVO · O CAMINHO SE AJUSTA AO SEU RITMO")
+        hero.pack(fill="x", pady=(0, 12))
+        hbody = tk.Frame(hero, bg=PANEL)
+        hbody.pack(fill="x", padx=15, pady=(0, 15))
+        avatar_box = tk.Frame(hbody, bg=PANEL_2, highlightbackground="#624289", highlightthickness=1)
+        avatar_box.pack(side="left", padx=(0, 14), pady=2)
+        try:
+            asset = "iria_portrait.png" if self.active_key == "caixa" else "hunter_portrait.png"
+            self.calendar_character_image = tk.PhotoImage(file=str(self._asset_path(asset))).subsample(3, 3)
+            tk.Label(avatar_box, image=self.calendar_character_image, bg=PANEL_2, bd=0).pack()
+        except Exception:
+            tk.Label(avatar_box, text="✦", bg=PANEL_2, fg=GOLD, font=(FONT, 32), width=4, height=3).pack()
+        words = tk.Frame(hbody, bg=PANEL)
+        words.pack(side="left", fill="both", expand=True)
+        tk.Label(words, text={"python": "A rota de quem constrói", "caixa": "A estratégia do candidato", "custom": "Sua jornada, suas regras"}.get(self.active_key, "Sua jornada"),
+                 bg=PANEL, fg=GOLD, font=(FONT, 15, "bold")).pack(anchor="w", pady=(5, 5))
+        if self.active_key == "caixa":
+            explanation = ("A trilha continua linear, mas o tempo recomendado acompanha a prioridade do edital de 2024: "
+                           "Conhecimentos Bancários (15 questões), Atendimento Bancário (10), e os demais eixos objetivos (5 cada). "
+                           "Redação recebe sessão própria por ser eliminatória. O calendário sugere mais tempo aos tópicos prioritários.")
+        elif self.active_key == "python":
+            explanation = ("Cronograma cronológico de Python: um tópico por dia como mínimo inicial. "
+                           "Ao terminar a meta, os próximos tópicos aparecem como bônus de hoje e a previsão futura se antecipa.")
+        else:
+            explanation = ("Cronograma cronológico da sua trilha pessoal. Escolha um mínimo diário viável; "
+                           "se estudar além da meta, as próximas etapas serão puxadas para mais cedo.")
+        tk.Label(words, text=explanation, bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=800, justify="left").pack(anchor="w", pady=(0, 10))
+
+        # The calendar includes a separate evidence-based reinforcement session. It is never
+        # inserted in place of the next linear lesson and never unlocks future chapters.
+        focus = current_metrics[0] if current_metrics else None
+        focus_card = self._card(root, "Foco estratégico extra", "O ALGORITMO ESCOLHE ONDE REFORÇAR")
+        focus_card.pack(fill="x", pady=(0, 12))
+        fb = tk.Frame(focus_card, bg=PANEL); fb.pack(fill="x", padx=15, pady=(0, 13))
+        due_now_count = len(self.due_reviews())
+        today_focus_plan = day_summary(p, self.active_key, today, today, blocked)
+        daily_budget_focus = int(cfg.get("daily_minutes", 60))
+        focus_minutes_left = max(0, daily_budget_focus - today_focus_plan["estimated_minutes"] - due_now_count * 8)
+        tk.Label(fb, text=f"Ordem da sessão: revisões vencidas ({due_now_count}) → próximo tópico liberado → reforço prioritário, apenas no tempo restante.", bg=PANEL, fg=TEXT, font=(FONT, 9, "bold"), wraplength=900, justify="left").pack(anchor="w", pady=(0, 7))
+        if focus:
+            focus_minutes = min(safe_int(focus.get("recommended_minutes", 0)), focus_minutes_left)
+            if focus_minutes:
+                focus_text = f"Maior prioridade agora: {focus['subject']} · {focus['status']} · reserve {focus_minutes} min dentro do orçamento de {daily_budget_focus} min/dia. {focus['recommendation']}"
+                focus_color = MINT
+            else:
+                focus_text = f"Maior prioridade: {focus['subject']} · {focus['status']}. O mínimo e as revisões já ocupam o orçamento de {daily_budget_focus} min; conclua o essencial e retome o reforço na próxima sessão. {focus['recommendation']}"
+                focus_color = GOLD
+            tk.Label(fb, text=focus_text, bg="#1d2928", fg=focus_color, font=(FONT, 9), wraplength=900, justify="left", padx=11, pady=9).pack(fill="x", pady=(0, 8))
+            actions_focus = tk.Frame(fb, bg=PANEL); actions_focus.pack(fill="x")
+            if focus.get("is_essay") and self.active_key == "caixa":
+                self._button(actions_focus, "TREINO DE REDAÇÃO EXTRA", self.start_essay_practice, "gold").pack(side="left")
+            else:
+                self._button(actions_focus, "DIAGNÓSTICO / REFORÇO", lambda subject=focus["subject"]:self.start_subject_diagnostic(subject), "mint").pack(side="left")
+            self._button(actions_focus, "ABRIR TREINADOR COMPLETO", lambda:self.navigate("Estratégia"), "secondary").pack(side="left", padx=(8, 0))
+        else:
+            tk.Label(fb, text="Conclua uma primeira etapa para iniciar a calibração por desempenho.", bg=PANEL, fg=MUTED, font=(FONT, 9)).pack(anchor="w")
+            self._button(fb, "ABRIR ESTRATÉGIA", lambda:self.navigate("Estratégia"), "primary").pack(anchor="w", pady=(7, 0))
+
+        controls = self._card(root, "Ritmo da campanha", "DEFINA O MÍNIMO — O EXCEDENTE É BÔNUS")
+        controls.pack(fill="x", pady=(0, 12))
+        cbody = tk.Frame(controls, bg=PANEL)
+        cbody.pack(fill="x", padx=15, pady=(0, 14))
+        tk.Label(cbody, text="Início do cronograma (AAAA-MM-DD)", bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        start_var = tk.StringVar(value=str(cfg.get("start_date", today.isoformat())))
+        start_entry = tk.Entry(cbody, textvariable=start_var, bg=PANEL_2, fg=TEXT, insertbackground=TEXT, relief="flat", width=15, font=(FONT, 9))
+        start_entry.grid(row=0, column=1, sticky="w", padx=(0, 20), pady=4, ipady=5)
+        tk.Label(cbody, text="Mínimo de tópicos por dia", bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).grid(row=0, column=2, sticky="w", padx=(0, 8), pady=4)
+        min_var = tk.StringVar(value=str(daily_min))
+        minimum_spin = tk.Spinbox(cbody, from_=1, to=5, textvariable=min_var, width=4, bg=PANEL_2, fg=TEXT,
+                                  buttonbackground=PANEL_2, insertbackground=TEXT, relief="flat", font=(FONT, 9))
+        minimum_spin.grid(row=0, column=3, sticky="w", padx=(0, 12), pady=4, ipady=4)
+
+        def apply_calendar_settings():
+            try:
+                start_date = date.fromisoformat(start_var.get().strip())
+                new_minimum = int(min_var.get())
+                if not 1 <= new_minimum <= 5:
+                    raise ValueError("O mínimo diário precisa ficar entre 1 e 5 tópicos.")
+                cfg["start_date"] = start_date.isoformat()
+                cfg["daily_minimum"] = new_minimum
+                cfg["version"] = 2
+                self.calendar_month = self.calendar_selected.replace(day=1)
+                self.save()
+                self.status_var.set("Calendário atualizado. A previsão foi recalculada a partir do primeiro tópico aberto.")
+                self.render()
+            except Exception as exc:
+                messagebox.showerror("Configuração inválida", f"Confira a data e o mínimo diário.\n\n{exc}")
+        self._button(cbody, "APLICAR E RECALCULAR", apply_calendar_settings, "primary").grid(row=0, column=4, sticky="w", pady=4)
+        for col, weight in enumerate([0, 0, 0, 0, 1]):
+            cbody.grid_columnconfigure(col, weight=weight)
+
+        calendar_card = self._card(root, "Mapa mensal", "CLIQUE EM UM DIA PARA VER AS MISSÕES")
+        calendar_card.pack(fill="x", pady=(0, 12))
+        calbody = tk.Frame(calendar_card, bg=PANEL)
+        calbody.pack(fill="x", padx=12, pady=(0, 12))
+        months_pt = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+        month_head = tk.Frame(calbody, bg=PANEL)
+        month_head.pack(fill="x", pady=(0, 8))
+        def prev_month():
+            self.calendar_month = (self.calendar_month - timedelta(days=1)).replace(day=1)
+            self.calendar_selected = self.calendar_month
+            self.render()
+        def next_month():
+            first = self.calendar_month.replace(day=1)
+            if first.month == 12:
+                self.calendar_month = date(first.year + 1, 1, 1)
+            else:
+                self.calendar_month = date(first.year, first.month + 1, 1)
+            self.calendar_selected = self.calendar_month
+            self.render()
+        self._button(month_head, "◀ MÊS ANTERIOR", prev_month, "secondary").pack(side="left")
+        tk.Label(month_head, text=f"{months_pt[month.month-1].upper()} / {month.year}", bg=PANEL, fg=TEXT, font=(FONT, 13, "bold")).pack(side="left", expand=True)
+        self._button(month_head, "PRÓXIMO MÊS ▶", next_month, "secondary").pack(side="right")
+
+        weekday_labels = ["SEG", "TER", "QUA", "QUI", "SEX", "SÁB", "DOM"]
+        day_grid = tk.Frame(calbody, bg=PANEL)
+        day_grid.pack(fill="x")
+        for col, weekday in enumerate(weekday_labels):
+            day_grid.grid_columnconfigure(col, weight=1, uniform="calendar")
+            tk.Label(day_grid, text=weekday, bg=PANEL, fg=MUTED, font=(FONT, 8, "bold")).grid(row=0, column=col, sticky="ew", padx=2, pady=(0, 4))
+        month_weeks = pycalendar.monthcalendar(month.year, month.month)
+        # Ensure a stable 6-row calendar so the lower detail panel does not jump vertically.
+        month_weeks += [[0] * 7 for _ in range(max(0, 6 - len(month_weeks)))]
+        month_weeks = month_weeks[:6]
+        for week_index, week in enumerate(month_weeks, start=1):
+            for col, day_number in enumerate(week):
+                if not day_number:
+                    tk.Label(day_grid, text="", bg=PANEL, height=3).grid(row=week_index, column=col, sticky="nsew", padx=2, pady=2)
+                    continue
+                target = date(month.year, month.month, day_number)
+                day_data = day_summary(p, self.active_key, target, today, blocked)
+                is_today = target == today
+                is_selected = target == selected
+                if target < today:
+                    done_n = len(day_data["lessons"])
+                    suffix = f"✓ {done_n} concluído(s)" if done_n else "sem registro"
+                    fg = MINT if done_n else MUTED
+                elif blocked:
+                    suffix = "⚔ guardião"
+                    fg = RED
+                else:
+                    lesson_n = len(day_data["lessons"])
+                    review_n = len(day_data["reviews"])
+                    suffix = f"{lesson_n} tópico(s)"
+                    if review_n:
+                        suffix += f" · ↻{review_n}"
+                    fg = GOLD if is_today else MUTED
+                if is_selected:
+                    bg = "#47316d"
+                elif is_today:
+                    bg = "#2c2442"
+                elif target < today:
+                    bg = "#171f25" if len(day_data["lessons"]) else PANEL_2
+                else:
+                    bg = PANEL_2
+                button = tk.Button(day_grid, text=f"{day_number:02d}\n{suffix}", command=lambda d=target:self._select_calendar_day(d),
+                                   bg=bg, fg=TEXT if is_selected or is_today else fg, activebackground=PURPLE_DARK,
+                                   activeforeground=TEXT, relief="flat", bd=0, height=3, anchor="nw", justify="left",
+                                   padx=7, pady=5, font=(FONT, 8, "bold" if is_today or is_selected else "normal"),
+                                   wraplength=100, cursor="hand2")
+                button.grid(row=week_index, column=col, sticky="nsew", padx=2, pady=2)
+
+        detail = self._card(root, "Plano do dia selecionado", "META MÍNIMA + REVISÕES + MISSÕES ADAPTATIVAS")
+        detail.pack(fill="x", pady=(0, 12))
+        db = tk.Frame(detail, bg=PANEL)
+        db.pack(fill="x", padx=15, pady=(0, 15))
+        tk.Label(db, text=self._pt_date(selected).upper(), bg=PANEL, fg=GOLD, font=(FONT, 10, "bold")).pack(anchor="w", pady=(0, 7))
+        if selected < today:
+            if summary["lessons"]:
+                tk.Label(db, text=f"{len(summary['lessons'])} tópico(s) concluído(s) nesta data.", bg=PANEL, fg=MINT, font=(FONT, 9, "bold")).pack(anchor="w", pady=(0, 8))
+                for mission in summary["lessons"]:
+                    row = tk.Frame(db, bg="#1e2b2a", highlightbackground="#315a50", highlightthickness=1)
+                    row.pack(fill="x", pady=3)
+                    tk.Label(row, text="✓", bg="#1e2b2a", fg=MINT, font=(FONT, 12, "bold"), width=4).pack(side="left", pady=7)
+                    tk.Label(row, text=mission.get("title", "Tópico concluído"), bg="#1e2b2a", fg=TEXT, font=(FONT, 9, "bold"),
+                             wraplength=690, justify="left", anchor="w").pack(side="left", fill="x", expand=True, pady=7)
+                    self._button(row, "REVER", lambda m=mission:self.start_lesson(m, replay=True), "secondary").pack(side="right", padx=8, pady=6)
+            else:
+                tk.Label(db, text="Nenhuma conclusão foi registrada para este dia. Os dias anteriores à ativação do calendário podem não ter histórico individual.",
+                         bg=PANEL, fg=MUTED, font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w", pady=(0, 8))
+        elif blocked:
+            tk.Label(db, text=f"PORTAL SELADO — derrote {boss['name']} para liberar a próxima região.", bg=PANEL, fg=RED,
+                     font=(FONT, 10, "bold"), wraplength=900, justify="left").pack(anchor="w", pady=(0, 8))
+            self._button(db, "IR À CÂMARA DOS GUARDIÕES  ⚔", lambda:self.navigate("Chefes"), "danger").pack(anchor="w", pady=(0, 8))
+        elif not summary["lessons"]:
+            tk.Label(db, text="A campanha foi concluída ou ainda não começou. Ajuste a data de início ou aproveite para revisar o códice.",
+                     bg=PANEL, fg=MINT, font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w", pady=(0, 8))
+        else:
+            minimum_text = f"MÍNIMO DO DIA: {summary['minimum']} tópico(s)  ·  TEMPO ESTIMADO: {summary['estimated_minutes']} min"
+            tk.Label(db, text=minimum_text, bg=PANEL, fg=TEXT, font=(FONT, 9, "bold")).pack(anchor="w", pady=(0, 7))
+            if summary["bonus_mode"]:
+                tk.Label(db, text="✦ META CUMPRIDA — os próximos tópicos foram puxados para hoje como bônus adaptativo.",
+                         bg="#29203b", fg=GOLD, font=(FONT, 9, "bold"), wraplength=900, justify="left", padx=10, pady=8).pack(fill="x", pady=(0, 8))
+            if selected > today:
+                tk.Label(db, text="PREVISÃO: conclua o mínimo dos dias anteriores para manter esta projeção. Se um dia ficar pendente, o calendário se reorganiza a partir do primeiro tópico não concluído.",
+                         bg=PANEL, fg=MUTED, font=(FONT, 8), wraplength=900, justify="left").pack(anchor="w", pady=(0, 8))
+            for index, mission in enumerate(summary["lessons"]):
+                row = tk.Frame(db, bg="#211d31", highlightbackground=BORDER, highlightthickness=1)
+                row.pack(fill="x", pady=3)
+                tk.Label(row, text=f"{mission.get('global_index', 0):03d}", bg="#211d31", fg=PURPLE, font=(FONT, 9, "bold"), width=5).pack(side="left", padx=(8, 2), pady=8)
+                textf = tk.Frame(row, bg="#211d31")
+                textf.pack(side="left", fill="x", expand=True, padx=5, pady=7)
+                tk.Label(textf, text=mission.get("title", "Tópico"), bg="#211d31", fg=TEXT, font=(FONT, 9, "bold"), wraplength=660, justify="left").pack(anchor="w")
+                meta = f"{priority_label(mission, self.active_key, current_metrics)}  ·  {estimated_minutes(mission, self.active_key)} min"
+                tk.Label(textf, text=meta, bg="#211d31", fg=GOLD if self.active_key == "caixa" else MUTED, font=(FONT, 8)).pack(anchor="w", pady=(2, 0))
+                current = self.next_lesson()
+                if selected == today and current and mission["id"] == current["id"]:
+                    self._button(row, "INICIAR", lambda m=mission:self.start_lesson(m), "mint").pack(side="right", padx=9, pady=7)
+                elif selected < today and mission["id"] in set(p.get("completed_missions", [])):
+                    self._button(row, "REVER", lambda m=mission:self.start_lesson(m, replay=True), "secondary").pack(side="right", padx=9, pady=7)
+                else:
+                    self._button(row, "PREVISTO" if selected > today else "NA FILA", lambda:None, "secondary", state="disabled").pack(side="right", padx=9, pady=7)
+        if summary["reviews"]:
+            revcard = self._card(root, "Recapitulações agendadas", f"{len(summary['reviews'])} PARA {selected.strftime('%d/%m/%Y')}")
+            revcard.pack(fill="x", pady=(0, 12))
+            revbody = tk.Frame(revcard, bg=PANEL)
+            revbody.pack(fill="x", padx=15, pady=(0, 12))
+            for review in summary["reviews"]:
+                tk.Label(revbody, text=f"↻  {review.get('title', 'Revisão de tópico')}", bg=PANEL, fg=TEXT, font=(FONT, 9, "bold"), anchor="w", wraplength=850, justify="left").pack(fill="x", pady=3)
+            self._button(revbody, "ABRIR CÂMARA DA MEMÓRIA", lambda:self.navigate("Revisões"), "gold").pack(anchor="w", pady=(5, 0))
+
+        if self.active_key == "caixa":
+            priority = self._card(root, "Peso do edital enviado", "REFERÊNCIA DE PLANEJAMENTO · TBN COMUM 2024")
+            priority.pack(fill="x", pady=(0, 12))
+            pb = tk.Frame(priority, bg=PANEL); pb.pack(fill="x", padx=15, pady=(0, 13))
+            for name, points, note in [
+                ("Conhecimentos Bancários", "15 questões", "Maior peso objetivo"),
+                ("Atendimento Bancário", "10 questões", "Segunda maior parcela"),
+                ("Demais eixos objetivos", "5 questões cada", "Repartir a preparação"),
+                ("Redação", "Eliminatória", "Reservar treino de escrita"),
+            ]:
+                line = tk.Frame(pb, bg=PANEL_2); line.pack(fill="x", pady=2)
+                tk.Label(line, text=name, bg=PANEL_2, fg=TEXT, font=(FONT, 8, "bold"), width=31, anchor="w").pack(side="left", padx=8, pady=7)
+                tk.Label(line, text=points, bg=PANEL_2, fg=GOLD, font=(FONT, 8, "bold"), width=18, anchor="w").pack(side="left", padx=8)
+                tk.Label(line, text=note, bg=PANEL_2, fg=MUTED, font=(FONT, 8), anchor="w").pack(side="left", padx=8)
+
+    def _select_calendar_day(self, value):
+        self.calendar_selected = value
+        self.calendar_month = value.replace(day=1)
+        self.render()
+
     def page_campaign(self):
         root = self.build_scroll_page()
         p = self.profile
@@ -853,8 +1590,15 @@ class HunterSystem(tk.Tk):
             dialogue = lesson.get("story_intro", "Íria aponta para a próxima página.")
             story_box = tk.Frame(shell, bg="#20172f", highlightbackground="#6b4c91", highlightthickness=1)
             story_box.pack(fill="x", pady=(0, 18))
-            tk.Label(story_box, text="ÍRIA  /  NARRADORA", bg="#20172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", padx=16, pady=(13, 5))
-            tk.Label(story_box, text=dialogue, bg="#20172f", fg="#e5dcef", font=(FONT, 10), wraplength=740, justify="left").pack(anchor="w", padx=16, pady=(0, 15))
+            try:
+                self.lesson_iria_image = tk.PhotoImage(file=str(self._asset_path("iria_portrait.png"))).subsample(3, 3)
+                tk.Label(story_box, image=self.lesson_iria_image, bg="#20172f", bd=0).pack(side="left", padx=(10, 14), pady=10)
+            except Exception:
+                tk.Label(story_box, text="ÍRIA", bg="#20172f", fg=PURPLE, font=(FONT, 13, "bold"), width=8, height=5).pack(side="left", padx=10, pady=10)
+            dialogue_panel = tk.Frame(story_box, bg="#20172f")
+            dialogue_panel.pack(side="left", fill="both", expand=True, padx=(0, 14), pady=10)
+            tk.Label(dialogue_panel, text="ÍRIA  /  NARRADORA", bg="#20172f", fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w", pady=(3, 5))
+            tk.Label(dialogue_panel, text=dialogue, bg="#20172f", fg="#e5dcef", font=(FONT, 10), wraplength=600, justify="left").pack(anchor="w", pady=(0, 5))
             tk.Label(shell, text="SEU OBJETIVO", bg=BG, fg=MINT, font=(FONT, 8, "bold")).pack(anchor="w")
             tk.Label(shell, text=lesson.get("success_criteria", "Explique o conceito e aplique-o em uma atividade."), bg=BG, fg=TEXT,
                      font=(FONT, 10), wraplength=780, justify="left").pack(anchor="w", pady=(5, 15))
@@ -904,6 +1648,7 @@ class HunterSystem(tk.Tk):
                     lambda score:self.finish_lesson(lesson, score),
                     retry_label="REFAZER A PROVA",
                     on_return=lambda:self.start_lesson(lesson, replay=True),
+                    on_attempt=lambda score, total, records:self._record_lesson_attempt(lesson, score, total, records),
                 )
             test_button = self._button(footer, "PROVAR DOMÍNIO · 4 QUESTÕES →", begin_test, "primary", state="disabled")
             test_button.pack(side="right")
@@ -916,7 +1661,7 @@ class HunterSystem(tk.Tk):
         else:
             draw_story()
 
-    def run_quiz_dialog(self, title, subtitle, questions, required_correct, on_success, retry_label="TENTAR NOVAMENTE", on_return=None):
+    def run_quiz_dialog(self, title, subtitle, questions, required_correct, on_success, retry_label="TENTAR NOVAMENTE", on_return=None, on_attempt=None, result_mode="mastery"):
         if not questions:
             messagebox.showwarning("Teste indisponível", "Ainda não há questões suficientes para esta prova.")
             return
@@ -928,7 +1673,7 @@ class HunterSystem(tk.Tk):
         win.minsize(680, 500)
         win.configure(bg=BG)
         win.transient(self); win.grab_set()
-        state = {"index": 0, "score": 0, "answered": False}
+        state = {"index": 0, "score": 0, "answered": False, "answer_records": [], "attempt_logged": False}
         host = tk.Frame(win, bg=BG); host.pack(fill="both", expand=True, padx=24, pady=20)
 
         def clear():
@@ -963,6 +1708,7 @@ class HunterSystem(tk.Tk):
                     state["answered"] = True
                     correct = selected == q.get("a", 0)
                     if correct: state["score"] += 1
+                    state["answer_records"].append({"question": q.get("q", ""), "subject": q.get("_planner_subject", q.get("subject", "Geral")), "block": q.get("_exam_block", q.get("block", "")), "correct": bool(correct)})
                     feedback.configure(text=("CORRETO. " if correct else f"RESPOSTA: {chr(65+q.get('a',0))}. ") + q.get("why", "Revise o conceito."), fg=MINT if correct else RED)
                     action.configure(text="PRÓXIMA QUESTÃO  →", command=advance, bg=PURPLE)
                 else:
@@ -978,22 +1724,45 @@ class HunterSystem(tk.Tk):
         def draw_result():
             clear()
             total = len(questions); score = state["score"]
+            if not state.get("attempt_logged"):
+                state["attempt_logged"] = True
+                if on_attempt:
+                    try:
+                        on_attempt(score, total, list(state["answer_records"]))
+                    except Exception as exc:
+                        messagebox.showwarning("Registro de resultado", f"O resultado foi calculado, mas o registro adaptativo falhou.\n\n{exc}", parent=win)
             passed = score >= required_correct
-            tk.Label(host, text="SELO DE DOMÍNIO", bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
-            tk.Label(host, text="Prova concluída" if passed else "Ainda há névoa nesta página", bg=BG, fg=MINT if passed else RED,
-                     font=(FONT, 21, "bold")).pack(anchor="w", pady=(7, 5))
-            tk.Label(host, text=f"Resultado: {score}/{total}  ·  mínimo exigido: {required_correct}/{total}", bg=BG, fg=TEXT, font=(FONT, 12, "bold")).pack(anchor="w", pady=(0, 12))
-            msg = "Você demonstrou domínio suficiente para avançar. A próxima página da história está pronta." if passed else "Releia as explicações das questões e tente novamente. Seu progresso não será penalizado, mas a próxima página permanece selada."
+            if result_mode == "diagnostic":
+                heading = "Diagnóstico registrado"
+                kicker = "CALIBRAÇÃO DE CONHECIMENTO"
+                msg = "Este resultado foi salvo como evidência de desempenho. Ele ajusta a prioridade do assunto, mas não altera a ordem da campanha nem libera conteúdo."
+                primary_label = "ATUALIZAR ESTRATÉGIA  →"
+            elif result_mode == "simulado":
+                heading = "Simulado concluído"
+                kicker = "RESULTADO DE TREINO · NÃO É PROVA OFICIAL"
+                msg = "O desempenho por assunto foi salvo. As áreas com mais erros recebem prioridade maior no próximo plano. Refaça depois de estudar os pontos fracos e compare a evolução."
+                primary_label = "VER ESTRATÉGIA  →"
+            else:
+                heading = "Prova concluída" if passed else "Ainda há névoa nesta página"
+                kicker = "SELO DE DOMÍNIO"
+                msg = "Você demonstrou domínio suficiente para avançar. A próxima página da história está pronta." if passed else "Releia as explicações das questões e tente novamente. Seu progresso não será penalizado, mas a próxima página permanece selada."
+                primary_label = "CONTINUAR A HISTÓRIA  →"
+            tk.Label(host, text=kicker, bg=BG, fg=GOLD, font=(FONT, 8, "bold")).pack(anchor="w")
+            tk.Label(host, text=heading, bg=BG, fg=(MINT if passed else RED), font=(FONT, 21, "bold")).pack(anchor="w", pady=(7, 5))
+            result_line = f"Resultado: {score}/{total}  ·  {score / max(1, total) * 100:.0f}% de acerto"
+            if result_mode == "mastery":
+                result_line += f"  ·  mínimo exigido: {required_correct}/{total}"
+            tk.Label(host, text=result_line, bg=BG, fg=TEXT, font=(FONT, 12, "bold")).pack(anchor="w", pady=(0, 12))
             tk.Label(host, text=msg, bg=PANEL, fg=MUTED, font=(FONT, 10), wraplength=680, justify="left", padx=15, pady=15).pack(fill="x")
             footer = tk.Frame(host, bg=BG); footer.pack(fill="x", side="bottom", pady=(20, 0))
-            if passed:
+            if passed or result_mode in ("diagnostic", "simulado"):
                 def accept():
                     win.destroy()
                     on_success(score)
-                self._button(footer, "CONTINUAR A HISTÓRIA  →", accept, "mint").pack(side="right")
+                self._button(footer, primary_label, accept, "mint").pack(side="right")
             else:
                 def retry():
-                    state["index"] = 0; state["score"] = 0; random.shuffle(questions); draw_question()
+                    state["index"] = 0; state["score"] = 0; state["answer_records"] = []; state["attempt_logged"] = False; random.shuffle(questions); draw_question()
                 self._button(footer, retry_label, retry, "primary").pack(side="right")
                 if on_return:
                     self._button(footer, "VOLTAR AO ESTUDO", lambda:(win.destroy(), on_return()), "secondary").pack(side="left")
@@ -1011,14 +1780,15 @@ class HunterSystem(tk.Tk):
         already_done = lid in p.get("completed_missions", [])
         if not already_done:
             p.setdefault("completed_missions", []).append(lid)
+            p.setdefault("calendar_completed_on", {})[lid] = date.today().isoformat()
             xp = safe_int(lesson.get("xp", 30)); gold = safe_int(lesson.get("coins", 10))
             p["gold"] += gold
             levels = self.gain_xp(xp)
             self.update_streak()
             p.setdefault("history", []).append({"date": date.today().isoformat(), "type": "lição", "title": lesson["title"], "xp": xp, "gold": gold, "score": score})
-            if not any(r.get("lesson_id") == lid for r in p.setdefault("review_queue", [])):
-                p["review_queue"].append({"id": f"review_{lid}", "lesson_id": lid, "title": lesson["title"], "topic": lesson["topic"],
-                                           "due_date": (date.today() + timedelta(days=1)).isoformat(), "done": False, "reward_claimed": False})
+            if not any(r.get("lesson_id") == lid and safe_int(r.get("stage", 1)) == 1 for r in p.setdefault("review_queue", [])):
+                p["review_queue"].append({"id": f"review_{lid}_s1", "lesson_id": lid, "title": lesson["title"], "topic": lesson["topic"],
+                                           "stage": 1, "interval_days": 1, "due_date": (date.today() + timedelta(days=1)).isoformat(), "done": False, "reward_claimed": False})
             if lesson.get("is_chapter_start"):
                 seen = p.setdefault("story_chapters_seen", [])
                 if lesson["chapter_index"] not in seen: seen.append(lesson["chapter_index"])
@@ -1051,12 +1821,12 @@ class HunterSystem(tk.Tk):
         due = self.due_reviews()
         future = sorted([r for r in p.get("review_queue", []) if not r.get("done") and r.get("due_date", "") > today], key=lambda x:x.get("due_date", ""))
         done_count = sum(1 for r in p.get("review_queue", []) if r.get("done"))
-        card = self._card(root, "A Câmara da Memória", "REPETIÇÃO ESPAÇADA · REVISÃO NO DIA SEGUINTE")
+        card = self._card(root, "A Câmara da Memória", "REPETIÇÃO ESPAÇADA · D+1 / D+7 / D+30")
         card.pack(fill="x", pady=(0, 14))
         body = tk.Frame(card, bg=PANEL); body.pack(fill="x", padx=16, pady=(0, 16))
         tk.Label(body, text=f"{len(due)} revisão(ões) vencida(s) hoje  ·  {len(future)} agendada(s)  ·  {done_count} já revisada(s)", bg=PANEL,
                  fg=GOLD if due else TEXT, font=(FONT, 11, "bold")).pack(anchor="w", pady=(0, 6))
-        tk.Label(body, text="Cada tópico concluído volta no dia seguinte. O teste é curto e sem consulta; se não passar, você pode tentar de novo sem perder XP nem progresso.", bg=PANEL, fg=MUTED,
+        tk.Label(body, text="Cada tópico retorna no dia seguinte; ao passar, a revisão seguinte é espaçada para 7 dias e depois 30 dias. Se não lembrar, revise e tente novamente: isso é informação para ajustar o estudo, não uma punição.", bg=PANEL, fg=MUTED,
                  font=(FONT, 9), wraplength=900, justify="left").pack(anchor="w")
 
         self._section(root, "Revisões que já venceram", "PRIORIDADE DE HOJE")
@@ -1077,7 +1847,9 @@ class HunterSystem(tk.Tk):
         body = tk.Frame(card, bg=PANEL); body.pack(fill="x", padx=14, pady=11)
         tk.Label(body, text=review.get("topic", "Recapitulação"), bg="#29213a", fg=PURPLE, font=(FONT, 7, "bold"), padx=7, pady=3).pack(anchor="w")
         tk.Label(body, text=review.get("title", "Revisão de tópico"), bg=PANEL, fg=TEXT, font=(FONT, 10, "bold"), wraplength=650, justify="left").pack(anchor="w", pady=(5, 3))
-        tk.Label(body, text=f"Data: {review.get('due_date','')} · 3 questões · precisa acertar 2/3", bg=PANEL, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
+        stage = safe_int(review.get("stage", 1), 1)
+        interval = safe_int(review.get("interval_days", {1: 1, 2: 7, 3: 30}.get(stage, 1)), 1)
+        tk.Label(body, text=f"Etapa D+{interval} · Data: {review.get('due_date','')} · 3 questões · precisa acertar 2/3", bg=PANEL, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
         if due_now:
             self._button(body, "INICIAR RECAPITULAÇÃO  ↻", lambda r=review:self.start_review(r), "gold").pack(anchor="e", pady=(7, 0))
         else:
@@ -1100,6 +1872,7 @@ class HunterSystem(tk.Tk):
         self.run_quiz_dialog(
             f"Recapitulação · {lesson['title']}", "Recupere de memória o que estudou ontem. São necessárias 2 respostas corretas em 3.",
             questions, 2, lambda score:self.finish_review(review, lesson, score), retry_label="TENTAR A REVISÃO NOVAMENTE",
+            on_attempt=lambda score, total, records:self._record_lesson_attempt(lesson, score, total, records),
         )
 
     def finish_review(self, review, lesson, score):
@@ -1114,9 +1887,20 @@ class HunterSystem(tk.Tk):
         levels = self.gain_xp(xp)
         self.update_streak()
         p.setdefault("history", []).append({"date":date.today().isoformat(), "type":"revisão", "title":lesson["title"], "xp":xp, "gold":gold, "score":score})
+        stage = safe_int(review.get("stage", 1), 1)
+        next_stage = stage + 1
+        if next_stage <= 3 and not any(r.get("lesson_id") == lesson["id"] and safe_int(r.get("stage", 1)) == next_stage for r in p.setdefault("review_queue", [])):
+            interval = {2: 7, 3: 30}[next_stage]
+            p["review_queue"].append({"id": f"review_{lesson['id']}_s{next_stage}", "lesson_id": lesson["id"],
+                                       "title": lesson["title"], "topic": lesson["topic"], "stage": next_stage,
+                                       "interval_days": interval, "due_date": (date.today() + timedelta(days=interval)).isoformat(),
+                                       "done": False, "reward_claimed": False})
         self.save(); self.render()
         msg = f"Recapitulação concluída: {score}/3.\n+{xp} XP · +{gold} ouro."
         if levels: msg += f"\nVocê subiu {levels} nível(is)!"
+        next_review = next((r for r in p.get("review_queue", []) if r.get("lesson_id") == lesson["id"] and not r.get("done") and safe_int(r.get("stage", 1)) == next_stage), None)
+        if next_review:
+            msg += f"\nPróxima revisão: {next_review['due_date']} (D+{next_review.get('interval_days', 7)})."
         self.status_var.set(f"Memória reforçada: {lesson['title']}.")
         messagebox.showinfo("Memória reforçada", msg)
 
@@ -1831,17 +2615,31 @@ class HunterSystem(tk.Tk):
         if not lines:
             lines=[("ÍRIA","A próxima página ainda não foi escrita. Continue sua jornada e volte depois.")]
         w=tk.Toplevel(self);w.title("Crônicas da Cidade Sem Aurora")
-        w.geometry("650x430");w.resizable(False,False);w.configure(bg="#100e18");w.transient(self);w.grab_set()
-        canvas=tk.Canvas(w,width=650,height=5,bg=PURPLE,highlightthickness=0);canvas.pack(fill="x")
+        w.geometry("850x515");w.minsize(760,470);w.configure(bg="#100e18");w.transient(self);w.grab_set()
+        canvas=tk.Canvas(w,height=5,bg=PURPLE,highlightthickness=0);canvas.pack(fill="x")
         story_banner = {"python":"CRÔNICAS  /  CIDADE SEM AURORA", "caixa":"ARQUIVO DOS ECOS  /  ROTA BANCÁRIA", "custom":"JORNADA LIVRE  /  MAPA EM BRANCO"}.get(self.active_key, "CRÔNICAS DA FORJA")
         story_title = {"intro":"A CHAMA QUE RESTOU" if self.active_key == "python" else ("O ARQUIVO DOS ECOS" if self.active_key == "caixa" else "O MAPA EM BRANCO"),"boss_1":"A PRIMEIRA PORTA","boss_2":"A MEMÓRIA DA NÉVOA","boss_3":"O MAPA INVISÍVEL","boss_4":"A ÚLTIMA PONTE","ending":"O FIM DA ÚLTIMA PÁGINA"}.get(scene,"UM FRAGMENTO DA CRÔNICA")
-        tk.Label(w,text=story_banner,bg="#100e18",fg=GOLD,font=(FONT,8,"bold")).pack(anchor="w",padx=28,pady=(24,8))
-        tk.Label(w,text=story_title,bg="#100e18",fg=TEXT,font=(FONT,18,"bold")).pack(anchor="w",padx=28)
-        speaker=tk.Label(w,text="",bg="#100e18",fg=PURPLE,font=(FONT,9,"bold"));speaker.pack(anchor="w",padx=28,pady=(20,6))
-        body=tk.Label(w,text="",bg="#100e18",fg="#d8d1e8",font=(FONT,11),wraplength=590,justify="left",anchor="nw")
-        body.pack(fill="both",expand=True,padx=28,pady=(0,12))
-        footer=tk.Frame(w,bg="#100e18");footer.pack(fill="x",padx=28,pady=(0,22))
-        counter=tk.Label(footer,text="",bg="#100e18",fg=MUTED,font=(FONT,8));counter.pack(side="left")
+        tk.Label(w,text=story_banner,bg="#100e18",fg=GOLD,font=(FONT,8,"bold")).pack(anchor="w",padx=24,pady=(17,5))
+        tk.Label(w,text=story_title,bg="#100e18",fg=TEXT,font=(FONT,18,"bold")).pack(anchor="w",padx=24,pady=(0,10))
+        middle=tk.Frame(w,bg="#100e18");middle.pack(fill="both",expand=True,padx=24,pady=(0,12))
+        portrait_panel=tk.Frame(middle,bg="#1b1528",highlightbackground="#624289",highlightthickness=1,width=205)
+        portrait_panel.pack(side="left",fill="y",padx=(0,15));portrait_panel.pack_propagate(False)
+        try:
+            self.story_iria_image=tk.PhotoImage(file=str(self._asset_path("iria_portrait.png"))).subsample(2,2)
+            self.story_hunter_image=tk.PhotoImage(file=str(self._asset_path("hunter_portrait.png"))).subsample(2,2)
+            portrait=tk.Label(portrait_panel,image=self.story_iria_image,bg="#1b1528",bd=0)
+            portrait.pack(padx=5,pady=(8,4))
+        except Exception:
+            portrait=tk.Label(portrait_panel,text="ÍRIA",bg="#1b1528",fg=PURPLE,font=(FONT,18,"bold"),width=14,height=8)
+            portrait.pack(padx=5,pady=8)
+        tk.Label(portrait_panel,text="CRÔNICAS DA FORJA",bg="#1b1528",fg=GOLD,font=(FONT,8,"bold")).pack(pady=(0,7))
+        dialogue_panel=tk.Frame(middle,bg="#171421",highlightbackground="#393048",highlightthickness=1)
+        dialogue_panel.pack(side="left",fill="both",expand=True)
+        speaker=tk.Label(dialogue_panel,text="",bg="#171421",fg=PURPLE,font=(FONT,9,"bold"));speaker.pack(anchor="w",padx=18,pady=(19,7))
+        body=tk.Label(dialogue_panel,text="",bg="#171421",fg="#e3dced",font=(FONT,11),wraplength=525,justify="left",anchor="nw")
+        body.pack(fill="both",expand=True,padx=18,pady=(0,16))
+        footer=tk.Frame(dialogue_panel,bg="#171421");footer.pack(fill="x",padx=18,pady=(0,17))
+        counter=tk.Label(footer,text="",bg="#171421",fg=MUTED,font=(FONT,8));counter.pack(side="left")
         btn=self._button(footer,"CONTINUAR  →",lambda:None,"primary");btn.pack(side="right")
         i={"n":0}
         def next_line():
@@ -1851,6 +2649,13 @@ class HunterSystem(tk.Tk):
             who,dialogue=lines[i["n"]]
             speaker.configure(text=who.upper())
             body.configure(text=dialogue)
+            # Portrait changes with the speaker so dialogue feels like a scene, not a bare popup.
+            if "VOCÊ" in who.upper() or "ECO" in who.upper() or "REI" in who.upper() or "EXAMINADOR" in who.upper():
+                try: portrait.configure(image=self.story_hunter_image)
+                except Exception: pass
+            else:
+                try: portrait.configure(image=self.story_iria_image)
+                except Exception: pass
             counter.configure(text=f"FRAGMENTO {i['n']+1:02d} / {len(lines):02d}")
             i["n"]+=1
             btn.configure(text="ENCERRAR  ✓" if i["n"]>=len(lines) else "CONTINUAR  →")

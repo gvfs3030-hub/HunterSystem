@@ -4,7 +4,7 @@ GERAR O EXECUTÁVEL PELO NAVEGADOR
 
 1. Baixe e extraia o ZIP do projeto no computador.
 2. No GitHub, crie um repositório vazio chamado hunter-system.
-3. Envie a pasta extraída completa. A raiz precisa conter main.py, game_data.py, campaign_data.py, requirements.txt, README.md, a pasta assets e .github/workflows/build-windows.yml.
+3. Envie a pasta extraída completa. A raiz precisa conter main.py, game_data.py, campaign_data.py, requirements.txt, README.md, a pasta assets, adaptive_planner.py, a pasta tests e .github/workflows/build-windows.yml.
 4. Se o GitHub não aceitar a pasta oculta .github, use Add file > Create new file e escreva no campo de nome: .github/workflows/build-windows.yml. Cole o workflow que acompanha o projeto e faça commit.
 5. Abra Actions > Build Hunter System para Windows > Run workflow.
 6. Aguarde a execução ficar verde. Abra a execução e baixe o artefato HunterSystem-Windows.
@@ -14,7 +14,7 @@ CAMPANHA
 - Python: 141 etapas temáticas inspiradas no curso Udemy; use o botão dentro da lição para abrir o curso e acompanhe o tema correspondente. A trilha não é uma transcrição dos 751 vídeos.
 - Caixa: 82 etapas temáticas baseadas no edital de Técnico Bancário Novo (não TI) anexado, edital 2024. Não é garantia de que um edital futuro será igual.
 - Jornada Livre: tópicos editáveis.
-- Para dominar uma página, faça a atividade e passe na prova de 4 questões (3 acertos necessários). Cada etapa agendará uma recapitulação para o dia seguinte. Os chefes também exigem prova cumulativa.
+- Para dominar uma página, faça a atividade e passe na prova de 4 questões (3 acertos necessários). Cada etapa agenda recapitulação D+1; ao concluir, a sequência avança para mais 7 e depois 30 dias após cada revisão concluída. Os chefes também exigem prova cumulativa.
 
 BACKUP E REINÍCIO
 - Configuração > Backup completo ZIP exporta todos os slots, anotações, inventários, histórico e revisões.
@@ -22,3 +22,22 @@ BACKUP E REINÍCIO
 - Configuração > Reiniciar / apagar progresso deste slot apaga somente o perfil aberto, depois de confirmação e backup automático.
 
 O ZIP DE ORIGEM NÃO CONTÉM O .EXE; o GitHub Actions compila o executável para Windows.
+
+
+CALENDÁRIO ADAPTATIVO
+- Abra Calendário no menu lateral para ver o mapa mensal, tarefas por dia e revisões.
+- Meta mínima inicial: Python 1 tópico/dia; Caixa 2 tópicos/dia; Jornada Livre 1 tópico/dia. Você pode ajustar entre 1 e 5 tópicos e editar a data de início.
+- Se terminar além da meta, os próximos tópicos aparecem como bônus do dia e a previsão é recalculada. A campanha não pula tópico pendente.
+- A Caixa recebe estimativa de tempo conforme o peso do edital TBN comum 2024 enviado: Conhecimentos Bancários (15 questões), Atendimento (10), demais eixos objetivos (5 cada), além de tempo de treino para Redação eliminatória.
+- O histórico diário é coletado a partir desta versão; o progresso antigo continua salvo, mas não é atribuído retroativamente a datas sem registro.
+
+VISUAIS
+- Novo ícone do Windows e do executável; cena panorâmica da Cidade sem Aurora e retratos da Íria e do protagonista nos diálogos.
+
+
+TREINADOR ADAPTATIVO — PRIMEIROS PASSOS
+- Abra Estratégia. Na Caixa, faça os diagnósticos de 5 questões das nove disciplinas objetivas; o app não inventa nota para assunto que ainda não mediu.
+- Use o simulado adaptativo de 20 questões para treinar áreas fracas e, quando já tiver estudado parte do conteúdo, faça o simulado de 60 questões com a distribuição do edital TBN comum 2024 (25 de conhecimentos básicos e 35 de específicos). As questões são do aplicativo, não questões oficiais da Cesgranrio.
+- A área Barreira contra eliminação acompanha os dois blocos em separado e pondera as matérias pelo número de questões. Quando não houver diagnóstico em todas as disciplinas, o percentual será explicitamente parcial. O corte do edital anexado é 50%; a meta pessoal do app é ajustável e deve ficar acima desse limite.
+- A redação é praticada na Oficina da Redação e acompanhada por uma rubrica de cinco critérios autoavaliados. O aplicativo não corrige redações automaticamente. Faça um treino semanal e, se possível, peça feedback humano.
+- Configure a data-alvo apenas quando tiver uma data razoável de prova em mente. Diagnósticos, erros, revisões e resultados dos simulados influenciam o foco seguinte; não existe garantia automática de aprovação.
