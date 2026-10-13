@@ -1,0 +1,2 @@
+# O aplicativo usa apenas a biblioteca padrão do Python/Tkinter.
+# No GitHub Actions, PyInstaller é instalado pelo workflow de build.
